@@ -92,6 +92,21 @@ create table if not exists public.support_tickets (
   resolved          boolean not null default false
 );
 
+create table if not exists public.legal_acceptances (
+  id                      uuid primary key default gen_random_uuid(),
+  profile_id              uuid not null references public.profiles(id) on delete cascade,
+  tenant_id               uuid references public.tenants(id) on delete cascade,   -- NULL si es superadmin
+  version                 text not null default 'v1.0.0',
+  ip_address              text,
+  user_agent              text,
+  terms_accepted          boolean not null default true,
+  privacy_accepted        boolean not null default true,
+  custody_waiver_accepted boolean not null default true,
+  accepted_at             timestamptz not null default now()
+);
+create index if not exists legal_acceptances_profile_idx on public.legal_acceptances(profile_id, version);
+create index if not exists legal_acceptances_tenant_idx on public.legal_acceptances(tenant_id, accepted_at desc);
+
 -- ---------------------------------------------------------------------
 -- 2. FUNCIONES AUXILIARES (security definer evita recursión en RLS)
 -- ---------------------------------------------------------------------
@@ -217,6 +232,15 @@ create policy support_insert on public.support_tickets for insert
 drop policy if exists support_update on public.support_tickets;
 create policy support_update on public.support_tickets for update
   using (public.is_superadmin()) with check (public.is_superadmin());
+
+-- legal_acceptances (Auditoría legal inmutable)
+alter table public.legal_acceptances enable row level security;
+drop policy if exists legal_select on public.legal_acceptances;
+create policy legal_select on public.legal_acceptances for select
+  using (public.is_superadmin() or profile_id = auth.uid() or (tenant_id is not null and tenant_id = public.auth_tenant_id()));
+drop policy if exists legal_insert on public.legal_acceptances;
+create policy legal_insert on public.legal_acceptances for insert
+  with check (public.is_superadmin() or profile_id = auth.uid());
 
 -- ---------------------------------------------------------------------
 -- 4. REALTIME (supabase.channel('tenant_parking'))

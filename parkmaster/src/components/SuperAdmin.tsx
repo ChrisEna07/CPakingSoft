@@ -1,10 +1,13 @@
 'use client';
-import { useMemo, useState } from 'react';
-import { Building2, Database, LifeBuoy, Plus, Power, Save, Wifi, WifiOff, CalendarPlus } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Building2, Database, LifeBuoy, Plus, Power, Save, Wifi, WifiOff, CalendarPlus,
+  ShieldCheck, Download, Printer, RefreshCw, CheckCircle2
+} from 'lucide-react';
 import { useStore } from '@/lib/store';
-import { dkey, downloadFile, money, uid } from '@/lib/format';
+import { dkey, downloadFile, fmtDT, money, uid } from '@/lib/format';
 import { buildSqlDump } from '@/lib/sqlExport';
-import { DEFAULT_CONFIG, type PlanType, type Tenant, type TenantStatus } from '@/lib/types';
+import { DEFAULT_CONFIG, type PlanType, type Tenant, type TenantStatus, type LegalAcceptance } from '@/lib/types';
 import { isEmail } from '@/lib/validators';
 import { Btn, Card, DigitsInput, TextInput, TextOnlyInput } from './ui';
 
@@ -15,9 +18,31 @@ const isOnline = (t: Tenant) => !!t.last_seen_at && Date.now() - new Date(t.last
 const statusCls: Record<TenantStatus, string> = { activo: 'bg-emerald-100 text-emerald-700', piloto: 'bg-indigo-100 text-indigo-700', mora: 'bg-amber-100 text-amber-800', suspendido: 'bg-red-100 text-red-700' };
 
 export function SuperAdmin() {
-  const { tenants, saveTenant, createTenant, fetchTenantDump, resolveSupport, toast, mode } = useStore();
+  const { tenants, saveTenant, createTenant, fetchTenantDump, resolveSupport, loadLegalAcceptances, toast, mode } = useStore();
+  const [activeTab, setActiveTab] = useState<'tenants' | 'legal'>('tenants');
   const [edit, setEdit] = useState<Tenant | null>(null);
   const [creating, setCreating] = useState(false);
+  const [legalList, setLegalList] = useState<LegalAcceptance[]>([]);
+  const [loadingLegal, setLoadingLegal] = useState(false);
+  const [legalFilter, setLegalFilter] = useState('');
+
+  const refreshLegal = async () => {
+    setLoadingLegal(true);
+    try {
+      const list = await loadLegalAcceptances();
+      setLegalList(list);
+    } catch {
+      toast('err', 'No se pudieron cargar los registros de auditoría legal.');
+    } finally {
+      setLoadingLegal(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'legal') {
+      refreshLegal();
+    }
+  }, [activeTab]);
 
   const k = useMemo(() => {
     const paying = tenants.filter(t => t.plan_type === 'mensual_saas');
@@ -59,50 +84,248 @@ export function SuperAdmin() {
     } catch { toast('err', 'No se pudo generar la migración: verifique su conexión.'); }
   };
 
+  const exportLegalCSV = () => {
+    if (legalList.length === 0) {
+      toast('info', 'No hay registros legales para exportar.');
+      return;
+    }
+    const headers = ['ID', 'Fecha_Aceptacion', 'Nombre_Usuario', 'Email', 'Rol', 'Parqueadero', 'IP', 'Navegador_UserAgent', 'Version_Terminos', 'Terminos_Aceptados', 'Privacidad_Aceptada', 'Exoneracion_Custodia_Aceptada'];
+    const rows = legalList.map(item => [
+      item.id,
+      item.accepted_at,
+      `"${(item.profile?.full_name || '').replace(/"/g, '""')}"`,
+      `"${(item.profile?.email || '').replace(/"/g, '""')}"`,
+      item.role || item.profile_role || 'N/A',
+      `"${(item.tenant?.business_name || 'Global / SuperAdmin').replace(/"/g, '""')}"`,
+      item.ip_address || 'N/A',
+      `"${(item.user_agent || '').replace(/"/g, '""')}"`,
+      item.agreement_version,
+      item.terms_accepted ? 'SI' : 'NO',
+      item.privacy_accepted ? 'SI' : 'NO',
+      item.custody_waiver_accepted ? 'SI' : 'NO',
+    ]);
+    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    downloadFile(`auditoria_legal_cparkingsoft_${dkey(Date.now())}.csv`, csvContent, 'text/csv;charset=utf-8');
+    toast('ok', 'Archivo CSV de auditoría legal exportado.');
+  };
+
+  const filteredLegal = useMemo(() => {
+    const q = legalFilter.trim().toLowerCase();
+    if (!q) return legalList;
+    return legalList.filter(item =>
+      (item.profile?.full_name && item.profile.full_name.toLowerCase().includes(q)) ||
+      (item.profile?.email && item.profile.email.toLowerCase().includes(q)) ||
+      (item.tenant?.business_name && item.tenant.business_name.toLowerCase().includes(q)) ||
+      (item.ip_address && item.ip_address.toLowerCase().includes(q)) ||
+      ((item.role || item.profile_role || '').toLowerCase().includes(q))
+    );
+  }, [legalList, legalFilter]);
+
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {[['Clientes registrados', k.total, `${k.pilotos} en piloto`], ['Al día (SaaS)', k.alDia, `${k.mora} en mora`], ['Recaudo mensual estimado', money(k.mrr), 'licencias activas + mora'], ['En línea ahora', k.online, `${k.soporte} con soporte abierto`]].map(([l, v, s]) => (
-          <Card key={String(l)} className="px-4 py-3"><div className="text-xs text-slate-500">{l}</div><div className="text-2xl font-black">{v}</div><div className="text-[11px] text-slate-400">{s}</div></Card>
-        ))}
+      {/* Pestañas SuperAdmin */}
+      <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+        <button
+          onClick={() => setActiveTab('tenants')}
+          className={`px-4 py-2 text-sm font-semibold rounded-lg flex items-center gap-2 transition ${
+            activeTab === 'tenants'
+              ? 'bg-slate-900 text-white shadow'
+              : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <Building2 size={16} /> Parqueaderos & Cobros
+        </button>
+        <button
+          onClick={() => setActiveTab('legal')}
+          className={`px-4 py-2 text-sm font-semibold rounded-lg flex items-center gap-2 transition ${
+            activeTab === 'legal'
+              ? 'bg-slate-900 text-white shadow'
+              : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <ShieldCheck size={16} /> Auditoría Legal & Términos
+          {legalList.length > 0 && (
+            <span className="ml-1 bg-amber-500/20 text-amber-700 text-xs px-2 py-0.5 rounded-full font-bold">
+              {legalList.length}
+            </span>
+          )}
+        </button>
       </div>
-      {k.proximos.length > 0 && (
-        <div className="bg-amber-50 border border-amber-300 text-amber-900 rounded-lg p-3 text-sm">
-          ⏰ <b>Próximos a cobrar (≤7 días):</b> {k.proximos.map(t => `${t.business_name} (${t.next_payment_date})`).join(' · ')}
-        </div>
-      )}
-      <Card className="p-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="font-bold flex items-center gap-2"><Building2 size={20} />Parqueaderos (tenants){mode === 'local' && <span className="text-xs font-normal text-amber-600">· datos demo locales</span>}</div>
-          <Btn onClick={() => setCreating(true)} className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 text-sm"><Plus size={16} />Nuevo parqueadero</Btn>
-        </div>
-        <div className="overflow-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-slate-100 text-slate-600 text-left"><tr>{['Parqueadero', 'Plan', 'Cuota', 'Estado', 'Próximo cobro', 'Conexión', 'Soporte', 'Acciones'].map(h => <th key={h} className="px-3 py-2 whitespace-nowrap">{h}</th>)}</tr></thead>
-            <tbody>{tenants.map(t => {
-              const d = daysTo(t.next_payment_date); const on = isOnline(t);
-              return (
-                <tr key={t.id} className="border-t align-top">
-                  <td className="px-3 py-2"><div className="font-semibold">{t.business_name}</div><div className="text-xs text-slate-500">{t.city} · NIT {t.nit_rut}</div></td>
-                  <td className="px-3 py-2 whitespace-nowrap">{t.plan_type.replace('_', ' ')}</td>
-                  <td className="px-3 py-2 whitespace-nowrap">{money(t.monthly_fee_cop)}<div className="text-xs text-slate-400">día {t.billing_due_day}</div></td>
-                  <td className="px-3 py-2"><span className={`text-xs font-bold px-2 py-0.5 rounded-full ${statusCls[t.status]}`}>{t.status}</span></td>
-                  <td className="px-3 py-2 whitespace-nowrap">{t.next_payment_date ?? '—'}{d !== null && <div className={`text-xs ${d < 0 ? 'text-red-600 font-bold' : d <= 7 ? 'text-amber-600 font-bold' : 'text-slate-400'}`}>{d < 0 ? `vencido hace ${-d} d` : `en ${d} d`}</div>}</td>
-                  <td className="px-3 py-2">{on ? <span className="text-emerald-600 flex items-center gap-1"><Wifi size={14} />En línea</span> : <span className="text-slate-400 flex items-center gap-1"><WifiOff size={14} />Fuera</span>}</td>
-                  <td className="px-3 py-2">{t.support_ticket_active ? <button onClick={() => resolveSupport(t.id).then(() => toast('ok', 'Soporte marcado como resuelto.'))} className="text-xs font-bold bg-red-100 text-red-700 rounded-full px-2 py-1 flex items-center gap-1"><LifeBuoy size={12} />ABIERTO · resolver</button> : <span className="text-slate-300">—</span>}</td>
-                  <td className="px-3 py-2"><div className="flex flex-wrap gap-1">
-                    <Btn onClick={() => patch(t, { status: t.status === 'suspendido' ? 'activo' : 'suspendido' }, t.status === 'suspendido' ? `${t.business_name} activado.` : `${t.business_name} suspendido: sus usuarios no podrán operar.`)} className="bg-slate-100 hover:bg-slate-200 text-xs px-2 py-1"><Power size={12} />{t.status === 'suspendido' ? 'Activar' : 'Suspender'}</Btn>
-                    {t.plan_type === 'piloto_7dias' && <Btn onClick={() => extendPilot(t)} className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs px-2 py-1"><CalendarPlus size={12} />+7 días</Btn>}
-                    {t.plan_type === 'mensual_saas' && <Btn onClick={() => registerPayment(t)} className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs px-2 py-1">Registrar pago</Btn>}
-                    <Btn onClick={() => setEdit(t)} className="bg-slate-100 hover:bg-slate-200 text-xs px-2 py-1">Editar plan</Btn>
-                    <Btn onClick={() => migrate(t)} className="bg-slate-800 hover:bg-slate-900 text-white text-xs px-2 py-1"><Database size={12} />Migrar</Btn>
-                  </div></td>
+
+      {activeTab === 'tenants' ? (
+        <>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {[['Clientes registrados', k.total, `${k.pilotos} en piloto`], ['Al día (SaaS)', k.alDia, `${k.mora} en mora`], ['Recaudo mensual estimado', money(k.mrr), 'licencias activas + mora'], ['En línea ahora', k.online, `${k.soporte} con soporte abierto`]].map(([l, v, s]) => (
+              <Card key={String(l)} className="px-4 py-3"><div className="text-xs text-slate-500">{l}</div><div className="text-2xl font-black">{v}</div><div className="text-[11px] text-slate-400">{s}</div></Card>
+            ))}
+          </div>
+          {k.proximos.length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 text-amber-900 rounded-lg p-3 text-sm">
+              ⏰ <b>Próximos a cobrar (≤7 días):</b> {k.proximos.map(t => `${t.business_name} (${t.next_payment_date})`).join(' · ')}
+            </div>
+          )}
+          <Card className="p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="font-bold flex items-center gap-2"><Building2 size={20} />Parqueaderos (tenants){mode === 'local' && <span className="text-xs font-normal text-amber-600">· datos demo locales</span>}</div>
+              <Btn onClick={() => setCreating(true)} className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 text-sm"><Plus size={16} />Nuevo parqueadero</Btn>
+            </div>
+            <div className="overflow-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-100 text-slate-600 text-left"><tr>{['Parqueadero', 'Plan', 'Cuota', 'Estado', 'Próximo cobro', 'Conexión', 'Soporte', 'Acciones'].map(h => <th key={h} className="px-3 py-2 whitespace-nowrap">{h}</th>)}</tr></thead>
+                <tbody>{tenants.map(t => {
+                  const d = daysTo(t.next_payment_date); const on = isOnline(t);
+                  return (
+                    <tr key={t.id} className="border-t align-top">
+                      <td className="px-3 py-2"><div className="font-semibold">{t.business_name}</div><div className="text-xs text-slate-500">{t.city} · NIT {t.nit_rut}</div></td>
+                      <td className="px-3 py-2 whitespace-nowrap">{t.plan_type.replace('_', ' ')}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">{money(t.monthly_fee_cop)}<div className="text-xs text-slate-400">día {t.billing_due_day}</div></td>
+                      <td className="px-3 py-2"><span className={`text-xs font-bold px-2 py-0.5 rounded-full ${statusCls[t.status]}`}>{t.status}</span></td>
+                      <td className="px-3 py-2 whitespace-nowrap">{t.next_payment_date ?? '—'}{d !== null && <div className={`text-xs ${d < 0 ? 'text-red-600 font-bold' : d <= 7 ? 'text-amber-600 font-bold' : 'text-slate-400'}`}>{d < 0 ? `vencido hace ${-d} d` : `en ${d} d`}</div>}</td>
+                      <td className="px-3 py-2">{on ? <span className="text-emerald-600 flex items-center gap-1"><Wifi size={14} />En línea</span> : <span className="text-slate-400 flex items-center gap-1"><WifiOff size={14} />Fuera</span>}</td>
+                      <td className="px-3 py-2">{t.support_ticket_active ? <button onClick={() => resolveSupport(t.id).then(() => toast('ok', 'Soporte marcado como resuelto.'))} className="text-xs font-bold bg-red-100 text-red-700 rounded-full px-2 py-1 flex items-center gap-1"><LifeBuoy size={12} />ABIERTO · resolver</button> : <span className="text-slate-300">—</span>}</td>
+                      <td className="px-3 py-2"><div className="flex flex-wrap gap-1">
+                        <Btn onClick={() => patch(t, { status: t.status === 'suspendido' ? 'activo' : 'suspendido' }, t.status === 'suspendido' ? `${t.business_name} activado.` : `${t.business_name} suspendido: sus usuarios no podrán operar.`)} className="bg-slate-100 hover:bg-slate-200 text-xs px-2 py-1"><Power size={12} />{t.status === 'suspendido' ? 'Activar' : 'Suspender'}</Btn>
+                        {t.plan_type === 'piloto_7dias' && <Btn onClick={() => extendPilot(t)} className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs px-2 py-1"><CalendarPlus size={12} />+7 días</Btn>}
+                        {t.plan_type === 'mensual_saas' && <Btn onClick={() => registerPayment(t)} className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs px-2 py-1">Registrar pago</Btn>}
+                        <Btn onClick={() => setEdit(t)} className="bg-slate-100 hover:bg-slate-200 text-xs px-2 py-1">Editar plan</Btn>
+                        <Btn onClick={() => migrate(t)} className="bg-slate-800 hover:bg-slate-900 text-white text-xs px-2 py-1"><Database size={12} />Migrar</Btn>
+                      </div></td>
+                    </tr>
+                  );
+                })}</tbody>
+              </table>
+            </div>
+          </Card>
+        </>
+      ) : (
+        <Card className="p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-slate-200">
+            <div>
+              <div className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <ShieldCheck className="text-emerald-600" size={22} />
+                Auditoría Legal y Aceptación de Términos
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Registro inmutable de acuerdos legales · Ley 1581 de 2012 de Colombia · Exoneración de Custodia
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Btn onClick={refreshLegal} disabled={loadingLegal} className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs py-2 px-3">
+                <RefreshCw size={14} className={loadingLegal ? 'animate-spin' : ''} />
+                Actualizar
+              </Btn>
+              <Btn onClick={exportLegalCSV} className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs py-2 px-3">
+                <Download size={14} />
+                Exportar CSV
+              </Btn>
+              <Btn onClick={() => window.print()} className="bg-slate-800 hover:bg-slate-900 text-white text-xs py-2 px-3">
+                <Printer size={14} />
+                Imprimir / PDF
+              </Btn>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <input
+              type="text"
+              placeholder="Buscar por usuario, correo, parqueadero o IP…"
+              value={legalFilter}
+              onChange={e => setLegalFilter(e.target.value)}
+              className="w-full max-w-sm border border-slate-300 rounded-lg px-3 py-1.5 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
+            />
+            <span className="text-xs text-slate-500">
+              Mostrando {filteredLegal.length} de {legalList.length} registros
+            </span>
+          </div>
+
+          <div className="overflow-auto max-h-[600px] border border-slate-200 rounded-lg">
+            <table className="w-full text-xs text-left">
+              <thead className="bg-slate-100 text-slate-700 sticky top-0 font-bold uppercase tracking-wider">
+                <tr>
+                  <th className="px-3 py-2.5">Fecha y Hora</th>
+                  <th className="px-3 py-2.5">Usuario / Perfil</th>
+                  <th className="px-3 py-2.5">Rol</th>
+                  <th className="px-3 py-2.5">Parqueadero</th>
+                  <th className="px-3 py-2.5">Dirección IP</th>
+                  <th className="px-3 py-2.5">Navegador</th>
+                  <th className="px-3 py-2.5">Versión</th>
+                  <th className="px-3 py-2.5 text-center">Términos</th>
+                  <th className="px-3 py-2.5 text-center">Privacidad</th>
+                  <th className="px-3 py-2.5 text-center">Exon. Custodia</th>
                 </tr>
-              );
-            })}</tbody>
-          </table>
-        </div>
-      </Card>
+              </thead>
+              <tbody className="divide-y divide-slate-200">
+                {filteredLegal.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="px-3 py-8 text-center text-slate-400">
+                      {loadingLegal ? 'Cargando registros legales…' : 'No se encontraron registros de aceptación legal.'}
+                    </td>
+                  </tr>
+                ) : (
+                  filteredLegal.map(item => (
+                    <tr key={item.id} className="hover:bg-slate-50">
+                      <td className="px-3 py-2.5 whitespace-nowrap font-medium text-slate-800">
+                        {fmtDT(item.accepted_at)}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <div className="font-semibold text-slate-900">{item.profile?.full_name || 'Desconocido'}</div>
+                        <div className="text-[11px] text-slate-500">{item.profile?.email || '-'}</div>
+                      </td>
+                      <td className="px-3 py-2.5 whitespace-nowrap">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-slate-200 text-slate-800">
+                          {item.role}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5 whitespace-nowrap">
+                        {item.tenant?.business_name || (
+                          <span className="text-slate-400 italic">Global / SuperAdmin</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5 font-mono text-[11px] text-slate-700 whitespace-nowrap">
+                        {item.ip_address || '127.0.0.1'}
+                      </td>
+                      <td className="px-3 py-2.5 max-w-[150px] truncate text-[11px] text-slate-500" title={item.user_agent || ''}>
+                        {item.user_agent || '-'}
+                      </td>
+                      <td className="px-3 py-2.5 font-mono font-semibold text-slate-700 whitespace-nowrap">
+                        {item.agreement_version}
+                      </td>
+                      <td className="px-3 py-2.5 text-center">
+                        {item.terms_accepted ? (
+                          <span className="inline-flex items-center gap-0.5 text-emerald-700 font-bold bg-emerald-100 px-2 py-0.5 rounded-full">
+                            <CheckCircle2 size={11} /> Sí
+                          </span>
+                        ) : (
+                          <span className="text-red-600 font-bold">No</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5 text-center">
+                        {item.privacy_accepted ? (
+                          <span className="inline-flex items-center gap-0.5 text-emerald-700 font-bold bg-emerald-100 px-2 py-0.5 rounded-full">
+                            <CheckCircle2 size={11} /> Sí
+                          </span>
+                        ) : (
+                          <span className="text-red-600 font-bold">No</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5 text-center">
+                        {item.custody_waiver_accepted ? (
+                          <span className="inline-flex items-center gap-0.5 text-emerald-700 font-bold bg-emerald-100 px-2 py-0.5 rounded-full">
+                            <CheckCircle2 size={11} /> Sí
+                          </span>
+                        ) : (
+                          <span className="text-red-600 font-bold">No</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
       {edit && <EditPlan t={edit} onClose={() => setEdit(null)} onSave={async p => { await patch(edit, p, 'Plan actualizado con éxito.'); setEdit(null); }} />}
       {creating && <CreateTenant onClose={() => setCreating(false)} onCreate={async (t, e, n, p) => { const r = await createTenant(t, e, n, p); toast(r.ok ? 'ok' : r.kind, r.message); if (r.ok) setCreating(false); }} />}
     </div>

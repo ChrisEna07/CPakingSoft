@@ -120,3 +120,25 @@ export const DEFAULT_CONFIG: TenantConfig = {
   barrier_enabled: false,
   barrier_open_seconds: 5,
 };
+
+export interface LegalAcceptance {
+  id: string;
+  profile_id: string;
+  tenant_id: string | null;
+  role?: string;
+  profile_role?: Role;
+  version?: string;
+  agreement_version: string;
+  ip_address: string | null;
+  user_agent: string | null;
+  terms_accepted: boolean;
+  privacy_accepted: boolean;
+  custody_waiver_accepted: boolean;
+  accepted_at: string;
+  // Auxiliares para auditoría visual
+  profile_name?: string;
+  profile_email?: string;
+  tenant_name?: string;
+  profile?: { full_name: string; email: string };
+  tenant?: { business_name: string };
+}

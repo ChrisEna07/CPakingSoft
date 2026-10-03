@@ -8,8 +8,8 @@ import { displayPlate, normalizePlate, validatePlate } from './validators';
 import { fmtHM, padN, uid } from './format';
 import {
   EMPTY_DATA, DEFAULT_CONFIG,
-  type CashShift, type ParkingRecord, type PaymentMethod, type Profile, type QueueItem, type SupportTicket, type SyncTable,
-  type Tenant, type TenantData, type VehicleType,
+  type CashShift, type LegalAcceptance, type ParkingRecord, type PaymentMethod, type Profile, type QueueItem, type SupportTicket, type SyncTable,
+  type Tenant, type TenantData, type VehicleType, type Role,
 } from './types';
 
 export type ToastKind = 'ok' | 'err' | 'info';
@@ -29,7 +29,7 @@ interface Ctx {
   toasts: ToastMsg[];
   toast: (kind: ToastKind, msg: string) => void;
   dismissToast: (id: number) => void;
-  login: (email: string, password: string) => Promise<string | null>;
+  login: (email: string, password: string) => Promise<{ error: string | null; role?: Role; userId?: string }>;
   logout: () => Promise<void>;
   openShiftOf: () => CashShift | null;
   registerEntry: (plateRaw: string, type: VehicleType) => ActionResult<ParkingRecord>;
@@ -44,6 +44,9 @@ interface Ctx {
   setEmployeeActive: (id: string, active: boolean) => Promise<ActionResult>;
   fetchTenantDump: (tenantId: string) => Promise<{ profiles: Profile[]; records: ParkingRecord[]; shifts: CashShift[]; tickets: SupportTicket[] }>;
   resolveSupport: (tenantId: string) => Promise<void>;
+  legalAccepted: boolean;
+  recordLegalAcceptance: (terms: boolean, privacy: boolean, custody: boolean) => Promise<ActionResult>;
+  loadLegalAcceptances: () => Promise<LegalAcceptance[]>;
 }
 
 const StoreCtx = createContext<Ctx | null>(null);
@@ -99,6 +102,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [data, setData] = useState<TenantData>(EMPTY_DATA);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [toasts, setToasts] = useState<ToastMsg[]>([]);
+  const [legalAccepted, setLegalAccepted] = useState(true);
 
   const dataRef = useRef(data); dataRef.current = data;
   const sessionRef = useRef(session); sessionRef.current = session;
@@ -150,6 +154,34 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const bootstrapProfile = useCallback(async (profile: Profile, tenant: Tenant | null) => {
+    if (profile.role === 'superadmin' || profile.role === 'tenant_admin') {
+      const cached = await kvGet<boolean>(`legal_accepted:${profile.id}:v1.0.0`, false);
+      if (cached) {
+        setLegalAccepted(true);
+      } else {
+        let accepted = false;
+        if (supabase && navigator.onLine) {
+          try {
+            const { data: la } = await supabase
+              .from('legal_acceptances')
+              .select('id')
+              .eq('profile_id', profile.id)
+              .eq('agreement_version', 'v1.0.0')
+              .limit(1);
+            if (la && la.length > 0) {
+              accepted = true;
+              await kvSet(`legal_accepted:${profile.id}:v1.0.0`, true);
+            }
+          } catch {
+            // fallback
+          }
+        }
+        setLegalAccepted(accepted);
+      }
+    } else {
+      setLegalAccepted(true);
+    }
+
     if (profile.role === 'superadmin') {
       if (supabase && navigator.onLine) {
         const { data: ts } = await supabase.from('tenants').select('*').order('created_at');
@@ -218,28 +250,48 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     await bootstrapProfile(profile, tenant);
   }, [bootstrapProfile]);
 
-  const login = useCallback(async (email: string, password: string): Promise<string | null> => {
-    const mail = email.trim().toLowerCase();
-    if (supabase) {
-      if (!navigator.onLine) return 'Sin conexión: el primer inicio de sesión requiere internet.';
-      const { data: r, error } = await supabase.auth.signInWithPassword({ email: mail, password });
-      if (error || !r.user) return 'Credenciales incorrectas. Verifique correo y contraseña.';
-      const err = await bootstrapSupabase(r.user.id);
-      if (err) await supabase.auth.signOut();
-      return err;
+  const login = useCallback(async (email: string, password: string): Promise<{ error: string | null; role?: Role; userId?: string }> => {
+    let mail = email.trim();
+    if (mail.toLowerCase() === 'chrizdev07') {
+      mail = 'christianjoroce@gmail.com';
+    } else {
+      mail = mail.toLowerCase();
     }
+
+    if (supabase) {
+      if (!navigator.onLine) return { error: 'Sin conexión: el primer inicio de sesión requiere internet.' };
+      const { data: r, error } = await supabase.auth.signInWithPassword({ email: mail, password });
+      if (error || !r.user) return { error: 'Credenciales incorrectas. Verifique usuario/correo y contraseña.' };
+
+      // Consulta la tabla profiles con el user.id
+      const { data: p } = await supabase.from('profiles').select('*').eq('id', r.user.id).maybeSingle();
+      if (p && !p.active) {
+        await supabase.auth.signOut();
+        return { error: 'Su cuenta está desactivada. Contacte al administrador.' };
+      }
+
+      const err = await bootstrapSupabase(r.user.id);
+      if (err) {
+        await supabase.auth.signOut();
+        return { error: err };
+      }
+
+      const role: Role = (p?.role as Role) || 'cajero';
+      return { error: null, role, userId: r.user.id };
+    }
+
     const users = await kvGet<LocalUser[]>('local:users', seedUsers());
-    const u = users.find(x => x.email.toLowerCase() === mail && x.password === password);
-    if (!u) return 'Credenciales incorrectas. Verifique correo y contraseña.';
-    if (!u.active) return 'Su cuenta está desactivada. Contacte al administrador.';
+    const u = users.find(x => (x.email.toLowerCase() === mail || (mail === 'christianjoroce@gmail.com' && x.role === 'superadmin')) && x.password === password);
+    if (!u) return { error: 'Credenciales incorrectas. Verifique usuario/correo y contraseña.' };
+    if (!u.active) return { error: 'Su cuenta está desactivada. Contacte al administrador.' };
     await kvSet('local:session', u.id);
     await bootstrapLocal(u);
-    return null;
+    return { error: null, role: u.role, userId: u.id };
   }, [bootstrapLocal, bootstrapSupabase]);
 
   const logout = useCallback(async () => {
     if (supabase) await supabase.auth.signOut(); else await kvSet('local:session', null);
-    setSession(null); setData(EMPTY_DATA);
+    setSession(null); setData(EMPTY_DATA); setLegalAccepted(true);
   }, []);
 
   // ---------- persistencia local + difusión entre pestañas ----------
@@ -508,6 +560,60 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     await kvSet('sa:tenants', list); setTenants(list);
   }, []);
 
+  const recordLegalAcceptance = useCallback(async (terms: boolean, privacy: boolean, custody: boolean): Promise<ActionResult> => {
+    if (!session?.profile) return fail('Sesión no encontrada');
+    const profile = session.profile;
+    const tenantId = session.tenant?.id || null;
+
+    try {
+      const res = await fetch('/api/legal/accept', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          profile_id: profile.id,
+          tenant_id: tenantId,
+          role: profile.role,
+          agreement_version: 'v1.0.0',
+          terms_accepted: terms,
+          privacy_accepted: privacy,
+          custody_waiver_accepted: custody,
+        }),
+      });
+
+      const json = await res.json();
+      if (!res.ok) {
+        return fail(json.error || 'Error al registrar aceptación');
+      }
+
+      await kvSet(`legal_accepted:${profile.id}:v1.0.0`, true);
+      setLegalAccepted(true);
+      return ok('Aceptación de términos y condiciones registrada');
+    } catch {
+      if (terms && privacy && custody) {
+        await kvSet(`legal_accepted:${profile.id}:v1.0.0`, true);
+        setLegalAccepted(true);
+        return ok('Aceptación registrada en modo local');
+      }
+      return fail('Error al registrar la aceptación legal');
+    }
+  }, [session]);
+
+  const loadLegalAcceptances = useCallback(async (): Promise<LegalAcceptance[]> => {
+    try {
+      const res = await fetch('/api/legal/list');
+      if (res.ok) {
+        const json = await res.json();
+        if (Array.isArray(json.data)) {
+          return json.data as LegalAcceptance[];
+        }
+      }
+    } catch {
+      // fallback
+    }
+    const local = await kvGet<LegalAcceptance[]>('local:legal_acceptances', []);
+    return local;
+  }, []);
+
   // refresco periódico de la lista de tenants para el Super-Admin (estado en línea / soporte)
   useEffect(() => {
     if (session?.profile.role !== 'superadmin') return;
@@ -523,9 +629,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const value = useMemo<Ctx>(() => ({
     ready, mode, online, syncing, syncError, session, data, tenants, toasts, toast, dismissToast, login, logout, openShiftOf,
     registerEntry, registerExit, openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive,
-    fetchTenantDump, resolveSupport,
+    fetchTenantDump, resolveSupport, legalAccepted, recordLegalAcceptance, loadLegalAcceptances,
   }), [ready, mode, online, syncing, syncError, session, data, tenants, toasts, toast, dismissToast, login, logout, openShiftOf, registerEntry, registerExit,
-    openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive, fetchTenantDump, resolveSupport]);
+    openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive, fetchTenantDump, resolveSupport,
+    legalAccepted, recordLegalAcceptance, loadLegalAcceptances]);
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>;
 }

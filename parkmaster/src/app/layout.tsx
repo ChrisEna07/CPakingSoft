@@ -4,8 +4,8 @@ import './globals.css';
 import { StoreProvider } from '@/lib/store';
 
 export const metadata: Metadata = {
-  title: 'ParkMaster SaaS · CParkingSoft',
-  description: 'Sistema integral de gestión de parqueaderos multi-tenant, offline-first',
+  title: 'CParkingSoft · Control Integral de Parqueaderos',
+  description: 'Sistema integral de gestión de parqueaderos SaaS Multi-Tenant y Offline-First',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

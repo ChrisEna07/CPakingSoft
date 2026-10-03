@@ -22,7 +22,21 @@ export function ThermalDoc({ doc, tenant }: { doc: PrintDocT; tenant: Tenant }) 
   const cfg = tenant.config_json;
   const width = cfg.paper_width === 58 ? '52mm' : '72mm';
   const Wrap = ({ children }: { children: React.ReactNode }) => <div className="thermal" style={{ width }}>{children}</div>;
-  const Head = () => (<><div className="c b" style={{ fontSize: 13 }}>{tenant.business_name.toUpperCase()}</div>{tenant.nit_rut && <div className="c small">NIT {tenant.nit_rut}</div>}<hr /></>);
+  const Head = () => (
+    <>
+      <div style={{ textAlign: 'center', marginBottom: 4 }}>
+        <img
+          src="/CparkingSoftLogo.jpg"
+          alt="CParkingSoft"
+          style={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 6, margin: '0 auto', display: 'block' }}
+        />
+        <div style={{ fontSize: 10, fontWeight: 'bold', letterSpacing: 0.5, marginTop: 2 }}>CParkingSoft</div>
+      </div>
+      <div className="c b" style={{ fontSize: 12 }}>{tenant.business_name.toUpperCase()}</div>
+      {tenant.nit_rut && <div className="c small">NIT {tenant.nit_rut}</div>}
+      <hr />
+    </>
+  );
 
   if (doc.kind === 'ticket') {
     const r = doc.record;
