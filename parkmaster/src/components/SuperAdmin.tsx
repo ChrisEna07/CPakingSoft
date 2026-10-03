@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Building2, Database, LifeBuoy, Plus, Power, Save, Wifi, WifiOff, CalendarPlus,
   ShieldCheck, Download, Printer, RefreshCw, CheckCircle2, Eye, EyeOff, Copy, Check,
-  KeyRound, Mail, UserCheck, AlertTriangle, UserPlus
+  KeyRound, Mail, UserCheck, AlertTriangle, UserPlus, Trash2
 } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { supabase } from '@/lib/supabase';
@@ -20,10 +20,11 @@ const isOnline = (t: Tenant) => !!t.last_seen_at && Date.now() - new Date(t.last
 const statusCls: Record<TenantStatus, string> = { activo: 'bg-emerald-100 text-emerald-700', piloto: 'bg-indigo-100 text-indigo-700', mora: 'bg-amber-100 text-amber-800', suspendido: 'bg-red-100 text-red-700' };
 
 export function SuperAdmin() {
-  const { tenants, saveTenant, createTenant, fetchTenantDump, resolveSupport, loadLegalAcceptances, toast, mode } = useStore();
+  const { tenants, saveTenant, createTenant, fetchTenantDump, resolveSupport, loadLegalAcceptances, resetFactory, toast, mode } = useStore();
   const [activeTab, setActiveTab] = useState<'tenants' | 'legal'>('tenants');
   const [edit, setEdit] = useState<Tenant | null>(null);
   const [creating, setCreating] = useState(false);
+  const [resetModal, setResetModal] = useState(false);
   const [accessTenant, setAccessTenant] = useState<Tenant | null>(null);
   const [legalList, setLegalList] = useState<LegalAcceptance[]>([]);
   const [loadingLegal, setLoadingLegal] = useState(false);
@@ -168,9 +169,14 @@ export function SuperAdmin() {
             </div>
           )}
           <Card className="p-4">
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
               <div className="font-bold flex items-center gap-2"><Building2 size={20} />Parqueaderos (tenants){mode === 'local' && <span className="text-xs font-normal text-amber-600">· datos demo locales</span>}</div>
-              <Btn onClick={() => setCreating(true)} className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 text-sm"><Plus size={16} />Nuevo parqueadero</Btn>
+              <div className="flex flex-wrap items-center gap-2">
+                <Btn onClick={() => setResetModal(true)} className="bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 px-3 py-2 text-xs sm:text-sm font-semibold flex items-center gap-1.5 shadow-sm">
+                  <Trash2 size={15} /> 🧹 Restablecer a Modo Fábrica / Limpiar Pruebas
+                </Btn>
+                <Btn onClick={() => setCreating(true)} className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 text-sm font-semibold"><Plus size={16} />Nuevo parqueadero</Btn>
+              </div>
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
@@ -335,8 +341,111 @@ export function SuperAdmin() {
 
       {edit && <EditPlan t={edit} onClose={() => setEdit(null)} onSave={async p => { await patch(edit, p, 'Plan actualizado con éxito.'); setEdit(null); }} />}
       {creating && <CreateTenant onClose={() => setCreating(false)} onCreate={async (t, e, n, p) => { const r = await createTenant(t, e, n, p); toast(r.ok ? 'ok' : r.kind, r.message); if (r.ok) setCreating(false); }} />}
+      {resetModal && (
+        <ResetFactoryModal
+          tenants={tenants}
+          onClose={() => setResetModal(false)}
+          onReset={async tid => {
+            const r = await resetFactory(tid);
+            toast(r.ok ? 'ok' : r.kind, r.message);
+          }}
+        />
+      )}
       {accessTenant && <TenantAccessModal t={accessTenant} onClose={() => setAccessTenant(null)} />}
     </div>
+  );
+}
+
+function ResetFactoryModal({
+  tenants,
+  onClose,
+  onReset,
+}: {
+  tenants: Tenant[];
+  onClose: () => void;
+  onReset: (tenantId?: string) => Promise<void>;
+}) {
+  const [selectedTenant, setSelectedTenant] = useState<string>('global');
+  const [confirmKeyword, setConfirmKeyword] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleExecute = async () => {
+    if (confirmKeyword !== 'RESETEAR') return;
+    setLoading(true);
+    try {
+      await onReset(selectedTenant === 'global' ? undefined : selectedTenant);
+      onClose();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Modal title="Restablecer a Modo Fábrica / Limpiar Pruebas" onClose={onClose}>
+      <div className="space-y-4 text-slate-800 text-xs sm:text-sm">
+        <div className="bg-red-50 border border-red-200 rounded-xl p-3.5 text-red-900 space-y-2">
+          <div className="font-bold flex items-center gap-1.5 text-red-700">
+            <AlertTriangle size={18} />
+            Advertencia de Purga Operativa
+          </div>
+          <p className="text-xs leading-relaxed text-red-800">
+            Esta acción purga de forma permanente los registros de transacciones (<code className="font-mono bg-red-100 px-1 py-0.5 rounded">parking_records</code>), turnos de caja (<code className="font-mono bg-red-100 px-1 py-0.5 rounded">cash_shifts</code>) y tiquetes de soporte.
+          </p>
+          <p className="text-xs text-emerald-800 bg-emerald-50 p-2 rounded-lg border border-emerald-200 font-semibold">
+            ✓ Las tarifas, configuración, administradores principales y la cuenta de Super-Admin quedarán 100% intactas.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-slate-600 mb-1">
+            Seleccione el Parqueadero a purgar:
+          </label>
+          <select
+            value={selectedTenant}
+            onChange={e => setSelectedTenant(e.target.value)}
+            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-xs sm:text-sm text-slate-900 focus:ring-2 focus:ring-red-500 outline-none"
+          >
+            <option value="global">Todos los parqueaderos (Purga Global de Pruebas)</option>
+            {tenants.map(t => (
+              <option key={t.id} value={t.id}>
+                {t.business_name} (NIT: {t.nit_rut || 'Sin NIT'})
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-slate-600 mb-1">
+            Para confirmar la purga, digite exactamente <b className="text-red-600 font-mono">RESETEAR</b>:
+          </label>
+          <input
+            type="text"
+            value={confirmKeyword}
+            onChange={e => setConfirmKeyword(e.target.value.toUpperCase())}
+            placeholder="RESETEAR"
+            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono font-bold text-slate-900 focus:ring-2 focus:ring-red-500 outline-none tracking-wider text-center"
+          />
+        </div>
+
+        <div className="pt-2 flex gap-2">
+          <Btn
+            onClick={onClose}
+            className="flex-1 bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs py-2.5 font-semibold"
+          >
+            Cancelar
+          </Btn>
+          <button
+            type="button"
+            disabled={confirmKeyword !== 'RESETEAR' || loading}
+            onClick={handleExecute}
+            className="flex-1 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white text-xs py-2.5 font-bold rounded-lg shadow-sm transition flex items-center justify-center gap-1.5"
+          >
+            <Trash2 size={15} />
+            {loading ? 'Purgando…' : '🧹 Ejecutar Limpieza'}
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Bike, Car, Printer, Search, LogOut, LogIn, Lock, Wallet, Ticket, Banknote, Landmark, Calculator, CheckCircle2, AlertTriangle, Info } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { liquidate, shiftTotals } from '@/lib/billing';
-import { displayPlate, normalizePlate, validatePlate } from '@/lib/validators';
+import { displayPlate, normalizePlate, validatePlate, getPlateWarning } from '@/lib/validators';
 import { durText, fmtDT, money } from '@/lib/format';
 import type { CashShift, ParkingRecord, PaymentMethod, VehicleType } from '@/lib/types';
 import { Btn, Card, DigitsInput } from './ui';
@@ -49,9 +49,42 @@ function Entry({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () 
   const [last, setLast] = useState<ParkingRecord | null>(null);
   const ref = useRef<HTMLInputElement>(null);
   const tenant = session!.tenant!;
-  useEffect(() => { ref.current?.focus(); }, []);
+
+  // Auto-focus persistente
+  useEffect(() => {
+    ref.current?.focus();
+    const interval = setInterval(() => {
+      const activeTag = document.activeElement?.tagName;
+      if (activeTag !== 'INPUT' && activeTag !== 'TEXTAREA') {
+        ref.current?.focus();
+      }
+    }, 800);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Atajos de teclado en taquilla POS
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'F1') {
+        e.preventDefault();
+        setType('moto');
+        ref.current?.focus();
+      } else if (e.key === 'F2') {
+        e.preventDefault();
+        setType('carro');
+        ref.current?.focus();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        setPlate('');
+        ref.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const err = plate ? validatePlate(plate, type) : null;
+  const warn = plate && !err ? getPlateWarning(plate, type) : null;
 
   const submit = () => {
     const r = registerEntry(plate, type);
@@ -62,7 +95,8 @@ function Entry({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () 
       return;
     }
     const rec = r.data!;
-    setLast(rec); setPlate('');
+    setLast(rec);
+    setPlate('');
     toast('ok', r.message.replace('generado.', 'generado e impreso.'));
     print({ kind: 'ticket', record: rec });
     ref.current?.focus();
@@ -71,31 +105,102 @@ function Entry({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () 
   return (
     <div className="grid lg:grid-cols-2 gap-5">
       <Card className="p-5">
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          {([['moto', 'Moto', Bike, tenant.config_json.rate_moto], ['carro', 'Carro', Car, tenant.config_json.rate_carro]] as const).map(([k, l, Ic, rate]) => (
-            <button key={k} onClick={() => { setType(k); setPlate(''); ref.current?.focus(); }} className={`rounded-xl border-2 p-3 flex flex-col items-center ${type === k ? 'border-emerald-500 bg-emerald-50' : 'border-slate-200 text-slate-500'}`}>
-              <Ic size={28} /><b>{l}</b><span className="text-sm">{money(rate)}/h</span>
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          {([['moto', 'Moto', Bike, tenant.config_json.rate_moto, 'F1 o 1'] as const, ['carro', 'Carro', Car, tenant.config_json.rate_carro, 'F2 o 2'] as const]).map(([k, l, Ic, rate, shortcut]) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => { setType(k); ref.current?.focus(); }}
+              className={`rounded-xl border-2 p-3 flex flex-col items-center transition relative ${type === k ? 'border-emerald-500 bg-emerald-50 text-emerald-900' : 'border-slate-200 text-slate-500 hover:border-slate-300'}`}
+            >
+              <span className="absolute top-1.5 right-2 text-[10px] font-mono font-bold bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded">
+                [{shortcut}]
+              </span>
+              <Ic size={28} />
+              <b>{l}</b>
+              <span className="text-sm font-semibold">{money(rate)}/h</span>
             </button>
           ))}
         </div>
-        <label className="text-xs font-semibold uppercase text-slate-500">Placa {type === 'moto' ? '(ABC12D)' : '(ABC123)'}</label>
-        <input ref={ref} value={plate} autoComplete="off" spellCheck={false} maxLength={6}
-          onChange={e => setPlate(normalizePlate(e.target.value))} onKeyDown={e => { if (e.key === 'Enter') submit(); }}
-          placeholder={type === 'moto' ? 'ABC12D' : 'ABC123'}
-          className={`w-full mt-1 text-center text-5xl font-black font-mono tracking-widest uppercase rounded-xl border-4 py-4 bg-amber-50 focus:outline-none focus:ring-4 focus:ring-emerald-300 ${err ? 'border-amber-500' : 'border-slate-800'}`} />
-        <div className="h-6 text-xs mt-1 text-center font-semibold">
-          {plate && (err ? <span className="text-amber-600">{err}</span> : <span className="text-emerald-600">✓ Formato válido: {displayPlate(plate)}</span>)}
+
+        <div className="flex items-center justify-between">
+          <label className="text-xs font-semibold uppercase text-slate-500">
+            Placa {type === 'moto' ? '(Motos: ABC12D, OLA92, ENB09H)' : '(Carros: ABC123, CD0123, OLA92)'}
+          </label>
+          <span className="text-[11px] text-slate-400 font-mono">
+            [Esc] Limpiar · [Enter] Ingresar
+          </span>
         </div>
-        <Btn onClick={submit} className="w-full mt-2 bg-emerald-600 hover:bg-emerald-700 text-white py-4 text-lg"><Printer size={22} />Ingresar e Imprimir Tiquete</Btn>
+
+        <input
+          ref={ref}
+          value={plate}
+          autoComplete="off"
+          spellCheck={false}
+          maxLength={8}
+          onChange={e => setPlate(normalizePlate(e.target.value))}
+          onKeyDown={e => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              submit();
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              setPlate('');
+            } else if (e.key === '1' && plate === '') {
+              e.preventDefault();
+              setType('moto');
+            } else if (e.key === '2' && plate === '') {
+              e.preventDefault();
+              setType('carro');
+            }
+          }}
+          placeholder={type === 'moto' ? 'ABC12D' : 'ABC123'}
+          className={`w-full mt-1 text-center text-4xl sm:text-5xl font-black font-mono tracking-widest uppercase rounded-xl border-4 py-3 sm:py-4 bg-amber-50 focus:outline-none focus:ring-4 focus:ring-emerald-300 ${err ? 'border-red-500' : warn ? 'border-amber-500' : 'border-slate-800'}`}
+        />
+
+        <div className="min-h-[24px] text-xs mt-1 text-center font-semibold flex items-center justify-center">
+          {plate && (
+            err ? (
+              <span className="text-red-600 flex items-center gap-1">
+                <AlertTriangle size={13} /> {err}
+              </span>
+            ) : warn ? (
+              <span className="text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full flex items-center gap-1">
+                <Info size={13} /> {warn}
+              </span>
+            ) : (
+              <span className="text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full flex items-center gap-1">
+                <CheckCircle2 size={13} /> Formato válido: <b>{displayPlate(plate)}</b>
+              </span>
+            )
+          )}
+        </div>
+
+        <Btn onClick={submit} className="w-full mt-2 bg-emerald-600 hover:bg-emerald-700 text-white py-3.5 sm:py-4 text-base sm:text-lg font-bold shadow-md transition">
+          <Printer size={22} /> Ingresar e Imprimir Tiquete [Enter]
+        </Btn>
       </Card>
       <Card className="p-4">
         {last ? (
           <>
-            <div className="flex items-center justify-between mb-3"><b className="flex items-center gap-2"><Ticket size={18} />Último tiquete</b>
-              <Btn onClick={() => print({ kind: 'ticket', record: last })} className="bg-slate-800 text-white text-sm px-3 py-1.5"><Printer size={16} />Reimprimir</Btn></div>
-            <div className="bg-slate-100 p-3 rounded-lg overflow-auto"><div className="bg-white mx-auto shadow border"><ThermalDoc doc={{ kind: 'ticket', record: last }} tenant={tenant} /></div></div>
+            <div className="flex items-center justify-between mb-3">
+              <b className="flex items-center gap-2"><Ticket size={18} />Último tiquete impreso</b>
+              <Btn onClick={() => print({ kind: 'ticket', record: last })} className="bg-slate-800 text-white text-xs sm:text-sm px-3 py-1.5">
+                <Printer size={16} /> Reimprimir
+              </Btn>
+            </div>
+            <div className="bg-slate-100 p-3 rounded-lg overflow-auto">
+              <div className="bg-white mx-auto shadow border">
+                <ThermalDoc doc={{ kind: 'ticket', record: last }} tenant={tenant} />
+              </div>
+            </div>
           </>
-        ) : <div className="text-center text-slate-400 text-sm py-16"><Ticket className="mx-auto mb-2" size={32} />La vista previa del tiquete aparecerá aquí</div>}
+        ) : (
+          <div className="text-center text-slate-400 text-sm py-16">
+            <Ticket className="mx-auto mb-2 opacity-40" size={36} />
+            La vista previa del último tiquete aparecerá aquí
+          </div>
+        )}
       </Card>
     </div>
   );

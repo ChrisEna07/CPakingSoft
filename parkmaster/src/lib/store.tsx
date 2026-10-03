@@ -41,7 +41,8 @@ interface Ctx {
   createTenant: (t: Tenant, adminEmail: string, adminName: string, adminPassword: string) => Promise<ActionResult>;
   loadEmployees: () => Promise<Profile[]>;
   createEmployee: (fullName: string, email: string, password: string) => Promise<ActionResult>;
-  setEmployeeActive: (id: string, active: boolean) => Promise<ActionResult>;
+  setEmployeeActive: (id: string, active: boolean, employeeName?: string) => Promise<ActionResult>;
+  resetFactory: (tenantId?: string) => Promise<ActionResult>;
   fetchTenantDump: (tenantId: string) => Promise<{ profiles: Profile[]; records: ParkingRecord[]; shifts: CashShift[]; tickets: SupportTicket[] }>;
   resolveSupport: (tenantId: string) => Promise<void>;
   legalAccepted: boolean;
@@ -560,15 +561,85 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return ok(`Cajero ${fullName} creado con éxito.`);
   }, []);
 
-  const setEmployeeActive = useCallback(async (id: string, active: boolean): Promise<ActionResult> => {
+  const setEmployeeActive = useCallback(async (id: string, active: boolean, employeeName?: string): Promise<ActionResult> => {
+    const d = dataRef.current;
+    if (!active) {
+      // Verificación en memoria / estado local primero
+      const localOpenShift = d.shifts.find(s => s.cashier_id === id && s.status === 'abierto');
+      if (localOpenShift) {
+        return fail(`OPERACION_DENEGADA_TURNO_ABIERTO: ${employeeName || 'El empleado'} tiene un turno de caja abierto en la estación Taquilla 1 (T1). Debe realizar el arqueo y cierre de caja antes de poder ser desactivado.`);
+      }
+    }
+
     if (supabase) {
       if (!navigator.onLine) return fail('Esta operación requiere conexión a internet.', 'info');
-      const { error } = await supabase.from('profiles').update({ active }).eq('id', id);
-      return error ? fail(error.message) : ok(active ? 'Cajero activado.' : 'Cajero desactivado.');
+      const { data: sess } = await supabase.auth.getSession();
+      const token = sess.session?.access_token || '';
+
+      try {
+        const res = await fetch('/api/employees/status', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ id, active }),
+        });
+
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          return fail(j.error || 'No se pudo cambiar el estado del empleado.');
+        }
+        return ok(j.message || (active ? 'Cajero activado.' : 'Cajero desactivado.'));
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : 'Error de red';
+        return fail(`Error al actualizar estado: ${msg}`);
+      }
     }
+
     const users = await kvGet<LocalUser[]>('local:users', seedUsers());
     await kvSet('local:users', users.map(u => (u.id === id ? { ...u, active } : u)));
     return ok(active ? 'Cajero activado.' : 'Cajero desactivado.');
+  }, []);
+
+  const resetFactory = useCallback(async (tenantId?: string): Promise<ActionResult> => {
+    if (supabase) {
+      if (!navigator.onLine) return fail('Esta operación requiere conexión a internet.', 'info');
+      const { data: sess } = await supabase.auth.getSession();
+      const token = sess.session?.access_token || '';
+
+      try {
+        const res = await fetch('/api/admin/reset-factory', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ tenantId, confirmation: 'RESETEAR' }),
+        });
+
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          return fail(j.error || 'Error al restablecer a modo fábrica.');
+        }
+
+        const currTenant = sessionRef.current?.tenant;
+        if (!tenantId || (currTenant && currTenant.id === tenantId)) {
+          setData(x => ({ ...x, records: [], shifts: [], tickets: [], queue: [], counters: { moto: 0, carro: 0 } }));
+        }
+
+        return ok(j.message || 'Datos de prueba purgados exitosamente.');
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : 'Error inesperado';
+        return fail(`Falla al ejecutar limpieza: ${msg}`);
+      }
+    }
+
+    setData(x => ({ ...x, records: [], shifts: [], tickets: [], counters: { moto: 0, carro: 0 } }));
+    if (tenantId) {
+      await kvSet(`snap:${tenantId}`, EMPTY_DATA);
+    }
+    return ok('Datos de prueba purgados en modo local.');
   }, []);
 
   const fetchTenantDump = useCallback(async (tenantId: string) => {
@@ -666,9 +737,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const value = useMemo<Ctx>(() => ({
     ready, mode, online, syncing, syncError, session, data, tenants, toasts, toast, dismissToast, login, logout, openShiftOf,
     registerEntry, registerExit, openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive,
-    fetchTenantDump, resolveSupport, legalAccepted, recordLegalAcceptance, loadLegalAcceptances,
+    resetFactory, fetchTenantDump, resolveSupport, legalAccepted, recordLegalAcceptance, loadLegalAcceptances,
   }), [ready, mode, online, syncing, syncError, session, data, tenants, toasts, toast, dismissToast, login, logout, openShiftOf, registerEntry, registerExit,
-    openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive, fetchTenantDump, resolveSupport,
+    openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive, resetFactory, fetchTenantDump, resolveSupport,
     legalAccepted, recordLegalAcceptance, loadLegalAcceptances]);
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>;

@@ -5,6 +5,20 @@ export const fmtDate = (d: string | number | Date) => { const x = new Date(d); r
 export const fmtTime = (d: string | number | Date) => { const x = new Date(d); return `${pad(x.getHours())}:${pad(x.getMinutes())}:${pad(x.getSeconds())}`; };
 export const fmtHM = (d: string | number | Date) => { const x = new Date(d); const h = x.getHours(); return `${pad(h % 12 || 12)}:${pad(x.getMinutes())} ${h < 12 ? 'AM' : 'PM'}`; };
 export const fmtDT = (d: string | number | Date) => `${fmtDate(d)} ${fmtTime(d)}`;
+export const fmtDT_CO = (d: string | number | Date | null | undefined): string => {
+  if (!d) return '-';
+  const x = new Date(d);
+  if (isNaN(x.getTime())) return '-';
+  const day = pad(x.getDate());
+  const month = pad(x.getMonth() + 1);
+  const year = x.getFullYear();
+  const hoursRaw = x.getHours();
+  const hours12 = pad(hoursRaw % 12 || 12);
+  const mins = pad(x.getMinutes());
+  const secs = pad(x.getSeconds());
+  const ampm = hoursRaw < 12 ? 'am' : 'pm';
+  return `${day}/${month}/${year} ${hours12}:${mins}:${secs} ${ampm}`;
+};
 export const uid = (): string =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
