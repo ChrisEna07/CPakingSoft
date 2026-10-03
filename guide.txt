@@ -1,0 +1,98 @@
+Actúa como un Arquitecto de Software Senior y Desarrollador Full-Stack experto en Next.js / React, Tailwind CSS, Supabase (PostgreSQL + RLS + Auth) y arquitectura SaaS Multi-Tenant.
+
+Necesito construir el sistema integral de gestión de parqueaderos "ParkMaster SaaS / CParkingSoft" listo para producción, con arquitectura Offline-First resiliente, sincronización en tiempo real y soporte multi-inquilino (multi-tenant) escalable para soportar desde este primer cliente (Parque Fabricato) hasta cientos de parqueaderos independientes.
+
+El sistema debe incluir estrictas validaciones de entrada, control de roles granular, un Super-Admin / Developer Panel para control de clientes y cobros recurrentes, soporte asistido por WhatsApp con captura de evidencia y un módulo de exportación/migración de base de datos a cuentas de clientes.
+
+---
+
+### 1. MODELO DE DATOS MULTI-TENANT (SUPABASE POSTGRESQL + DDL)
+Genera el script SQL de inicialización con Row Level Security (RLS) habilitado en todas las tablas:
+
+1. `tenants` (Parqueaderos registrados):
+   - `id` (UUID PK), `business_name` (ej. "Centro Comercial Parque Fabricato"), `nit_rut`, `slug`, `city`, `address`, `phone`.
+   - `plan_type` ('mensual_saas' | 'licencia_definitiva' | 'piloto_7dias').
+   - `monthly_fee_cop` (ej. 220000), `billing_due_day` (día del mes para cobro, 1-31), `last_payment_date`, `next_payment_date`.
+   - `status` ('activo' | 'suspendido' | 'piloto' | 'mora').
+   - `is_online` (boolean / heartbeat timestamp).
+   - `support_ticket_active` (boolean, marca si el cliente abrió soporte).
+   - `config_json` (tarifas: valor hora moto, valor hora carro, minutos de gracia, texto legal en tiquetes, prefijo de tiquete).
+   - `created_at`.
+
+2. `profiles` (Usuarios asociados a un tenant o SuperAdmin):
+   - `id` (UUID referencias auth.users), `tenant_id` (UUID referencias tenants.id, NULL si es SuperAdmin), `full_name`, `email`, `role` ('superadmin' | 'tenant_admin' | 'cajero'), `active` (boolean).
+
+3. `parking_records` (Vehículos y cobros):
+   - `id` (UUID PK), `tenant_id` (UUID referencias tenants.id), `ticket_code` (ej. "PF-MTO-0104"), `plate` (VARCHAR 10), `vehicle_type` ('moto' | 'carro').
+   - `entry_time` (TIMESTAMPTZ), `exit_time` (TIMESTAMPTZ, nullable), `status` ('dentro' | 'cobrado' | 'anulado').
+   - `total_minutes` (INT), `billed_hours` (INT), `total_amount` (NUMERIC), `payment_method` ('efectivo' | 'transferencia' | 'cortesia').
+   - `created_by` (UUID perfil cajero), `closed_by` (UUID perfil cajero).
+   - `sync_status` ('synced' | 'pending').
+
+4. `cash_shifts` (Arqueo de turnos por tenant):
+   - `id`, `tenant_id`, `cashier_id`, `opened_at`, `closed_at`, `initial_base_cash`, `system_calculated_cash`, `reported_cash`, `difference`, `status` ('abierto' | 'cerrado').
+
+5. `support_tickets` (Logs de soporte):
+   - `id`, `tenant_id`, `reported_by`, `issue_description`, `screenshot_url`, `created_at`, `resolved` (boolean).
+
+---
+
+### 2. ROLES Y MATRIZ DE ACCESO (AUTENTICACIÓN):
+
+1. **Super-Admin (Panel de Desarrollador - ChrizDev):**
+   - Acceso exclusivo con correo maestro.
+   - Vista global de todos los tenants registrados.
+   - Analíticas financieras: Cuántos están al día, próximos a cobrar (con alerta de fecha de corte), recaudación total estimada mensual por licencias.
+   - Monitoreo en vivo: Ver qué parqueadero está en línea, cuál tiene alertas de soporte abiertas, cuál está en prueba piloto.
+   - Botón de acción: Activar/Suspender inquilino, extender días de piloto, editar plan de pago.
+   - **Módulo de Migración Independiente:** Herramienta que exporta en formato SQL / JSON estructurado todos los datos históricos y esquemas de un tenant específico, permitiendo descargar el dump listo para importar en una cuenta propia de Supabase si el cliente compra la licencia definitiva.
+
+2. **Tenant Admin (Administrador del Parqueadero / Supervisor):**
+   - Configuración de su negocio: Nombre del parqueadero (ej: "Parque Fabricato"), NIT, tarifas de moto/carro, tiempo de gracia, configuración de talanqueras.
+   - Gestión de empleados: Crear cuentas de cajeros/taquilleros asignados exclusivamente a su parqueadero.
+   - Métricas y reportes: Auditorías de caja, descargas a Excel de facturación y movimientos.
+
+3. **Cajero / Taquillero:**
+   - Acceso restringido exclusivamente a la pantalla operativa:
+     * Registro de entrada e impresión térmica directa (CSS `@media print`).
+     * Cobro de salida por QR o digitando placa.
+     * Apertura y Arqueo Ciego de Turno.
+     * Botón flotante de Soporte.
+
+---
+
+### 3. BOTÓN DE SOPORTE TÉCNICO DIRECTO (WHATSAPP 3183517802):
+- Incluye un botón flotante y accesible de "Soporte Técnico Especializado":
+  * Al hacer clic, abre un modal explicativo:
+    "Para atender tu requerimiento de inmediato, es indispensable adjuntar una captura de pantalla clara donde se observe el error o el inconveniente completo."
+  * El modal incluye:
+    - Campo de descripción breve del problema.
+    - Área para cargar/pegar la captura de pantalla (`input type="file" accept="image/*"`).
+    - Botón "Enviar a WhatsApp de Soporte (318 351 7802)" que compone un mensaje dinámico con:
+      `https://wa.me/573183517802?text=Hola%20Christian,%20solicito%20soporte%20para%20el%20parqueadero:%20[NOMBRE_TENANT].%20Usuario:%20[EMAIL].%20Problema:%20[DESCRIPCION].%20(Adjunto%20captura%20a%20continuación)`
+    - Actualiza el campo `support_ticket_active` a `true` en el dashboard del Desarrollador.
+
+---
+
+### 4. VALIDACIONES Y FEEDBACK STRICTOS (CERO TOLERANCIA A DATOS INVÁLIDOS):
+El sistema debe tener un blindaje total contra errores tipográficos y dar feedback visual explícito e inmediato:
+- **Campos de Solo Texto (Nombres, Ciudades):** Bloqueo en tiempo real (`onKeyDown` / regex). No permite caracteres numéricos. Si el usuario intenta teclear números, muestra advertencia debajo: "Este campo solo admite letras".
+- **Campos de Solo Número (Dinero, Teléfonos, NIT, Tarifas):** Solo permite dígitos `0-9`. No permite letras ni caracteres especiales (`e`, `+`, `-`).
+- **Placas Vehiculares:** Conversión automática forzada a MAYÚSCULAS. Formato validado con regex para placas colombianas (Motos: 3 letras y 2 números + 1 letra / Carros: 3 letras y 3 números).
+- **Toast Notifications y Modales de Feedback:**
+  * **Éxito (Verde):** Detalle claro (ej: *"Entrada registrada con éxito: Moto placa ABC-12D. Tiquete #PF-0248 generado e impreso"*).
+  * **Fallo (Rojo):** Explicación explícita del motivo (ej: *"Error al ingresar vehículo: La placa ABC-12D ya registra una entrada activa a las 08:30 AM sin registrar salida. Verifique si el vehículo sigue en patio"*).
+  * **Información / Alerta (Ámbar):** Explicación de estados (ej: *"Turno no iniciado: Debe ingresar la base de dinero en efectivo antes de registrar entradas"*).
+
+---
+
+### 5. ARQUITECTURA OFFLINE-FIRST + REALTIME (VERCEL + SUPABASE):
+- Si se interrumpe la conexión a internet en la bahía de Parque Fabricato:
+  * El sistema detecta `navigator.onLine === false` y activa el badge "Modo Local / Desconectado".
+  * Guarda todas las entradas y cobros en `IndexedDB` / `localStorage` local del navegador.
+  * La impresión térmica y el cálculo de tarifas siguen funcionando en milisegundos sin congelarse.
+- Al restaurarse la red (`online` event):
+  * Dispara automáticamente la sincronización de la cola pendiente contra Supabase con una transacción limpia.
+  * Los cambios se propagan por WebSockets (`supabase.channel('tenant_parking')`) para que el resto de cajeros y el supervisor vean los cupos actualizados al instante.
+
+Genera la estructura de código limpia, modular, completamente tipada y lista para compilar sin errores en Vercel.
