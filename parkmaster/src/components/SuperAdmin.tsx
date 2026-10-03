@@ -2,12 +2,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Building2, Database, LifeBuoy, Plus, Power, Save, Wifi, WifiOff, CalendarPlus,
-  ShieldCheck, Download, Printer, RefreshCw, CheckCircle2
+  ShieldCheck, Download, Printer, RefreshCw, CheckCircle2, Eye, EyeOff, Copy, Check,
+  KeyRound, Mail, UserCheck
 } from 'lucide-react';
 import { useStore } from '@/lib/store';
+import { supabase } from '@/lib/supabase';
 import { dkey, downloadFile, fmtDT, money, uid } from '@/lib/format';
 import { buildSqlDump } from '@/lib/sqlExport';
-import { DEFAULT_CONFIG, type PlanType, type Tenant, type TenantStatus, type LegalAcceptance } from '@/lib/types';
+import { DEFAULT_CONFIG, type PlanType, type Tenant, type TenantStatus, type LegalAcceptance, type Profile } from '@/lib/types';
 import { isEmail } from '@/lib/validators';
 import { Btn, Card, DigitsInput, TextInput, TextOnlyInput } from './ui';
 
@@ -22,6 +24,7 @@ export function SuperAdmin() {
   const [activeTab, setActiveTab] = useState<'tenants' | 'legal'>('tenants');
   const [edit, setEdit] = useState<Tenant | null>(null);
   const [creating, setCreating] = useState(false);
+  const [accessTenant, setAccessTenant] = useState<Tenant | null>(null);
   const [legalList, setLegalList] = useState<LegalAcceptance[]>([]);
   const [loadingLegal, setLoadingLegal] = useState(false);
   const [legalFilter, setLegalFilter] = useState('');
@@ -184,6 +187,10 @@ export function SuperAdmin() {
                       <td className="px-3 py-2">{on ? <span className="text-emerald-600 flex items-center gap-1"><Wifi size={14} />En línea</span> : <span className="text-slate-400 flex items-center gap-1"><WifiOff size={14} />Fuera</span>}</td>
                       <td className="px-3 py-2">{t.support_ticket_active ? <button onClick={() => resolveSupport(t.id).then(() => toast('ok', 'Soporte marcado como resuelto.'))} className="text-xs font-bold bg-red-100 text-red-700 rounded-full px-2 py-1 flex items-center gap-1"><LifeBuoy size={12} />ABIERTO · resolver</button> : <span className="text-slate-300">—</span>}</td>
                       <td className="px-3 py-2"><div className="flex flex-wrap gap-1">
+                        <Btn onClick={() => setAccessTenant(t)} className="bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs px-2 py-1 font-semibold flex items-center gap-1 shadow-sm">
+                          <Eye size={13} className="text-amber-700" />
+                          Detalles & Accesos
+                        </Btn>
                         <Btn onClick={() => patch(t, { status: t.status === 'suspendido' ? 'activo' : 'suspendido' }, t.status === 'suspendido' ? `${t.business_name} activado.` : `${t.business_name} suspendido: sus usuarios no podrán operar.`)} className="bg-slate-100 hover:bg-slate-200 text-xs px-2 py-1"><Power size={12} />{t.status === 'suspendido' ? 'Activar' : 'Suspender'}</Btn>
                         {t.plan_type === 'piloto_7dias' && <Btn onClick={() => extendPilot(t)} className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs px-2 py-1"><CalendarPlus size={12} />+7 días</Btn>}
                         {t.plan_type === 'mensual_saas' && <Btn onClick={() => registerPayment(t)} className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs px-2 py-1">Registrar pago</Btn>}
@@ -328,6 +335,7 @@ export function SuperAdmin() {
 
       {edit && <EditPlan t={edit} onClose={() => setEdit(null)} onSave={async p => { await patch(edit, p, 'Plan actualizado con éxito.'); setEdit(null); }} />}
       {creating && <CreateTenant onClose={() => setCreating(false)} onCreate={async (t, e, n, p) => { const r = await createTenant(t, e, n, p); toast(r.ok ? 'ok' : r.kind, r.message); if (r.ok) setCreating(false); }} />}
+      {accessTenant && <TenantAccessModal t={accessTenant} onClose={() => setAccessTenant(null)} />}
     </div>
   );
 }
@@ -390,6 +398,295 @@ function CreateTenant({ onClose, onCreate }: { onClose: () => void; onCreate: (t
       <TextInput label="Correo" value={aEmail} onChange={setAEmail} />
       <label className="block text-xs text-slate-500 font-medium">Contraseña inicial<input type="password" value={aPw} onChange={e => setAPw(e.target.value)} className="block w-full border border-slate-300 rounded-lg px-3 py-2 text-base text-slate-900" /></label>
       <Btn onClick={go} className="w-full bg-indigo-600 text-white py-2.5"><Plus size={16} />Crear</Btn>
+    </Modal>
+  );
+}
+
+function TenantAccessModal({ t, onClose }: { t: Tenant; onClose: () => void }) {
+  const { toast, fetchTenantDump } = useStore();
+  const [adminUser, setAdminUser] = useState<Profile | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [newPassword, setNewPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [sendingEmail, setSendingEmail] = useState(false);
+  const [copiedKit, setCopiedKit] = useState(false);
+  const [copiedPw, setCopiedPw] = useState(false);
+  const [lastAssignedPassword, setLastAssignedPassword] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      setLoading(true);
+      try {
+        if (supabase) {
+          const { data: p } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('tenant_id', t.id)
+            .eq('role', 'tenant_admin')
+            .maybeSingle();
+
+          if (active && p) {
+            setAdminUser(p as Profile);
+            setLoading(false);
+            return;
+          }
+        }
+        const dump = await fetchTenantDump(t.id);
+        if (active) {
+          const found = dump.profiles.find(x => x.role === 'tenant_admin') || dump.profiles[0] || null;
+          setAdminUser(found);
+        }
+      } catch (e) {
+        console.warn('Error cargando administrador del tenant:', e);
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [t.id, fetchTenantDump]);
+
+  const copyWhatsAppKit = () => {
+    if (!adminUser) return;
+    const rawEnv = process.env.NEXT_PUBLIC_SITE_URL;
+    const cleanEnv = rawEnv ? rawEnv.match(/https?:\/\/[^\s\]\)\"\'\,]+/)?.[0]?.replace(/\/$/, '') || rawEnv.trim().replace(/\/$/, '') : '';
+    const siteUrl = cleanEnv
+      || (typeof window !== 'undefined' ? window.location.origin : 'https://c-paking-soft.vercel.app');
+
+    const message = `¡Hola! Aquí tienes los datos de acceso para tu sistema CParkingSoft:
+🌐 Enlace: ${siteUrl}
+👤 Usuario: ${adminUser.email}
+🔑 Si olvidaste tu clave, usa el enlace '¿Olvidaste tu contraseña?' en la pantalla de inicio o solicítanos un restablecimiento.`;
+
+    navigator.clipboard.writeText(message);
+    setCopiedKit(true);
+    toast('ok', '¡Kit de acceso copiado al portapapeles!');
+    setTimeout(() => setCopiedKit(false), 3000);
+  };
+
+  const handleManualReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminUser) {
+      toast('err', 'No hay usuario administrador identificado.');
+      return;
+    }
+    const cleanPw = newPassword.trim();
+    if (cleanPw.length < 6) {
+      toast('err', 'La contraseña manual debe tener al menos 6 caracteres.');
+      return;
+    }
+
+    setResetting(true);
+    try {
+      let token = '';
+      if (supabase) {
+        const { data: s } = await supabase.auth.getSession();
+        token = s.session?.access_token || '';
+      }
+
+      const res = await fetch('/api/admin/reset-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          user_id: adminUser.id,
+          password: cleanPw,
+        }),
+      });
+
+      const json = await res.json();
+      if (!res.ok) {
+        toast('err', json.error || 'Error al actualizar contraseña.');
+      } else {
+        toast('ok', `Contraseña de ${adminUser.full_name} actualizada con éxito.`);
+        setLastAssignedPassword(cleanPw);
+        setNewPassword('');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error inesperado';
+      toast('err', `Falla de red: ${msg}`);
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  const handleSendEmailReset = async () => {
+    if (!adminUser) return;
+    setSendingEmail(true);
+    try {
+      const rawEnv = process.env.NEXT_PUBLIC_SITE_URL;
+      const cleanEnv = rawEnv ? rawEnv.match(/https?:\/\/[^\s\]\)\"\'\,]+/)?.[0]?.replace(/\/$/, '') || rawEnv.trim().replace(/\/$/, '') : '';
+      const siteUrl = cleanEnv
+        || (typeof window !== 'undefined' ? window.location.origin : 'https://c-paking-soft.vercel.app');
+
+      const { error } = await supabase.auth.resetPasswordForEmail(adminUser.email.trim(), {
+        redirectTo: `${siteUrl}/reset-password`,
+      });
+
+      if (error) {
+        toast('err', `Error al enviar correo: ${error.message}`);
+      } else {
+        toast('ok', `Enlace de restablecimiento enviado a ${adminUser.email}`);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error al enviar enlace';
+      toast('err', `Falla: ${msg}`);
+    } finally {
+      setSendingEmail(false);
+    }
+  };
+
+  const copyPassword = (pw: string) => {
+    navigator.clipboard.writeText(pw);
+    setCopiedPw(true);
+    toast('ok', 'Contraseña copiada al portapapeles.');
+    setTimeout(() => setCopiedPw(false), 2500);
+  };
+
+  return (
+    <Modal title={`Detalles & Accesos · ${t.business_name}`} onClose={onClose}>
+      <div className="space-y-4 text-slate-800">
+        {/* Encabezado */}
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="font-bold text-base text-slate-900">{t.business_name}</div>
+            <div className="text-xs text-slate-500 font-mono">
+              NIT: {t.nit_rut || 'Sin registrar'} · Ciudad: {t.city || 'No especificada'}
+            </div>
+          </div>
+          <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${statusCls[t.status]}`}>
+            {t.status.toUpperCase()}
+          </span>
+        </div>
+
+        {/* Datos del Administrador Principal */}
+        <div className="border border-slate-200 rounded-xl p-3 space-y-2">
+          <div className="text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
+            <UserCheck size={15} className="text-indigo-600" />
+            Administrador Principal
+          </div>
+          {loading ? (
+            <div className="text-xs text-slate-500 py-2">Cargando datos del administrador…</div>
+          ) : !adminUser ? (
+            <div className="text-xs text-amber-700 bg-amber-50 p-2.5 rounded-lg border border-amber-200">
+              No se encontró un perfil administrativo asignado a este parqueadero.
+            </div>
+          ) : (
+            <div className="grid sm:grid-cols-2 gap-2 text-xs">
+              <div>
+                <span className="text-slate-400 block">Nombre completo:</span>
+                <span className="font-semibold text-slate-900">{adminUser.full_name}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block">Correo de acceso:</span>
+                <span className="font-semibold text-slate-900 font-mono">{adminUser.email}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block">Rol en el sistema:</span>
+                <span className="inline-block bg-indigo-50 text-indigo-700 font-bold px-2 py-0.5 rounded-md mt-0.5">
+                  {adminUser.role}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-400 block">Fecha de registro:</span>
+                <span className="text-slate-700 font-medium">
+                  {t.created_at ? fmtDT(t.created_at) : 'No disponible'}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Acciones de Soporte Inmediato */}
+        {adminUser && (
+          <div className="space-y-3 pt-1">
+            <div className="text-xs font-bold text-slate-600 uppercase tracking-wider">
+              Acciones de Soporte Inmediato
+            </div>
+
+            {/* a) Botón Copiar Kit WhatsApp */}
+            <button
+              type="button"
+              onClick={copyWhatsAppKit}
+              className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 text-xs shadow-sm transition"
+            >
+              {copiedKit ? <Check size={16} /> : <Copy size={16} />}
+              {copiedKit ? '¡Copiado al Portapapeles!' : '📋 Copiar Kit de Acceso para WhatsApp'}
+            </button>
+
+            {/* b) Sección Resetear Contraseña Manual */}
+            <form onSubmit={handleManualReset} className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
+                <KeyRound size={14} className="text-amber-600" />
+                Resetear Contraseña Administrativa
+              </div>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    placeholder="Nueva contraseña (mín. 6)"
+                    value={newPassword}
+                    onChange={e => setNewPassword(e.target.value)}
+                    className="w-full border border-slate-300 rounded-lg pl-3 pr-9 py-1.5 text-xs text-slate-900 focus:ring-2 focus:ring-amber-500 outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute inset-y-0 right-0 pr-2.5 flex items-center text-slate-400 hover:text-slate-600 focus:outline-none"
+                  >
+                    {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
+                <Btn
+                  type="submit"
+                  disabled={resetting || newPassword.trim().length < 6}
+                  className="bg-slate-900 hover:bg-slate-800 text-white text-xs px-3 py-1.5 font-semibold"
+                >
+                  {resetting ? 'Guardando…' : 'Establecer'}
+                </Btn>
+              </div>
+
+              {lastAssignedPassword && (
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2 flex items-center justify-between text-xs text-emerald-900">
+                  <div className="truncate">
+                    <b>Clave asignada:</b> <code className="bg-white px-1.5 py-0.5 rounded border border-emerald-300 font-bold">{lastAssignedPassword}</code>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => copyPassword(lastAssignedPassword)}
+                    className="ml-2 text-emerald-700 hover:text-emerald-900 font-bold flex items-center gap-1 flex-shrink-0"
+                  >
+                    {copiedPw ? <Check size={13} /> : <Copy size={13} />}
+                    {copiedPw ? 'Copiada' : 'Copiar'}
+                  </button>
+                </div>
+              )}
+            </form>
+
+            {/* c) Botón Enviar Enlace por Correo */}
+            <div className="pt-1">
+              <button
+                type="button"
+                onClick={handleSendEmailReset}
+                disabled={sendingEmail}
+                className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-2 px-3 rounded-xl flex items-center justify-center gap-2 text-xs border border-slate-300 transition"
+              >
+                <Mail size={15} />
+                {sendingEmail ? 'Enviando correo…' : `✉️ Enviar Enlace de Restablecimiento por Correo a ${adminUser.email}`}
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="pt-2 flex justify-end">
+          <Btn onClick={onClose} className="bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs px-4 py-2">
+            Cerrar
+          </Btn>
+        </div>
+      </div>
     </Modal>
   );
 }

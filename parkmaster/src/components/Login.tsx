@@ -79,9 +79,13 @@ export function Login() {
 
     setSendingRecovery(true);
     try {
-      // 2. Ejecutar directamente sin bloqueo de modo local
+      const rawEnv = process.env.NEXT_PUBLIC_SITE_URL;
+      const cleanEnv = rawEnv ? rawEnv.match(/https?:\/\/[^\s\]\)\"\'\,]+/)?.[0]?.replace(/\/$/, '') || rawEnv.trim().replace(/\/$/, '') : '';
+      const siteUrl = cleanEnv
+        || (typeof window !== 'undefined' ? window.location.origin : 'https://c-paking-soft.vercel.app');
+
       const { error } = await supabase.auth.resetPasswordForEmail(mail, {
-        redirectTo: `${window.location.origin}/reset-password`,
+        redirectTo: `${siteUrl}/reset-password`,
       });
 
       if (error) {

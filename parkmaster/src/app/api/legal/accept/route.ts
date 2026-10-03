@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { supabaseUrl } from '@/lib/supabase';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -44,7 +45,7 @@ export async function POST(req: Request) {
       accepted_at,
     };
 
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const url = supabaseUrl;
     const service = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
     if (url && service) {

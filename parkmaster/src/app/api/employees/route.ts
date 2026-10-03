@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { supabaseUrl } from '@/lib/supabase';
 
 export const runtime = 'nodejs';
 
@@ -11,7 +12,7 @@ interface Body { role?: string; tenant_id?: string; email?: string; full_name?: 
  * - superadmin: puede crear tenant_admin o cajero en cualquier tenant.
  */
 export async function POST(req: Request) {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const url = supabaseUrl;
   const service = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !service) return NextResponse.json({ error: 'Servidor sin configurar: falta SUPABASE_SERVICE_ROLE_KEY.' }, { status: 500 });
 
