@@ -489,14 +489,51 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const { data: ins, error } = await supabase.from('tenants').insert(row).select().single();
       if (error || !ins) return fail(`No se pudo crear el parqueadero: ${error?.message ?? 'error'}`);
       const nt = normTenant(ins as Record<string, unknown>);
-      const r = await createEmployeeRemote({ role: 'tenant_admin', tenant_id: nt.id, email: adminEmail, full_name: adminName, password: adminPassword });
+
+      const { data: sess } = await supabase.auth.getSession();
+      const token = sess.session?.access_token ?? '';
+
+      let adminSuccess = false;
+      let adminErrorMsg = '';
+
+      try {
+        const res = await fetch('/api/admin/create-tenant-admin', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            tenantId: nt.id,
+            fullName: adminName,
+            email: adminEmail,
+            password: adminPassword,
+          }),
+        });
+
+        const j = await res.json().catch(() => ({}));
+        if (res.ok) {
+          adminSuccess = true;
+        } else {
+          adminErrorMsg = j.error || 'No se pudo crear el usuario administrador.';
+        }
+      } catch (e: unknown) {
+        adminErrorMsg = e instanceof Error ? e.message : 'Error de conexión al crear administrador.';
+      }
+
+      if (!adminSuccess) {
+        // Rollback atómico: eliminar tenant para evitar registros huérfanos sin admin
+        await supabase.from('tenants').delete().eq('id', nt.id);
+        return fail(`Falló la creación del administrador: ${adminErrorMsg}. Se canceló la creación del parqueadero.`);
+      }
+
       setTenants(l => [...l, nt]);
-      return r.ok ? ok('Parqueadero y administrador creados con éxito.') : fail(`Parqueadero creado, pero falló el administrador: ${r.message}`);
+      return ok('Parqueadero y administrador creados con éxito.');
     }
-    const list = [...(await kvGet<Tenant[]>('sa:tenants', seedTenants())), t];
-    await kvSet('sa:tenants', list); setTenants(list);
     const users = await kvGet<LocalUser[]>('local:users', seedUsers());
     if (users.some(u => u.email.toLowerCase() === adminEmail.toLowerCase())) return fail('Ese correo ya está registrado.');
+    const list = [...(await kvGet<Tenant[]>('sa:tenants', seedTenants())), t];
+    await kvSet('sa:tenants', list); setTenants(list);
     await kvSet('local:users', [...users, { id: uid(), tenant_id: t.id, full_name: adminName, email: adminEmail, role: 'tenant_admin', active: true, password: adminPassword }]);
     return ok('Parqueadero y administrador creados con éxito.');
   }, []);

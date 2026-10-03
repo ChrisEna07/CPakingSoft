@@ -1,9 +1,9 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Building2, Database, LifeBuoy, Plus, Power, Save, Wifi, WifiOff, CalendarPlus,
   ShieldCheck, Download, Printer, RefreshCw, CheckCircle2, Eye, EyeOff, Copy, Check,
-  KeyRound, Mail, UserCheck
+  KeyRound, Mail, UserCheck, AlertTriangle, UserPlus
 } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { supabase } from '@/lib/supabase';
@@ -414,38 +414,104 @@ function TenantAccessModal({ t, onClose }: { t: Tenant; onClose: () => void }) {
   const [copiedPw, setCopiedPw] = useState(false);
   const [lastAssignedPassword, setLastAssignedPassword] = useState<string | null>(null);
 
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      setLoading(true);
-      try {
-        if (supabase) {
-          const { data: p } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('tenant_id', t.id)
-            .eq('role', 'tenant_admin')
-            .maybeSingle();
+  // Estados para formulario de asignación cuando no hay administrador
+  const [createName, setCreateName] = useState('');
+  const [createEmail, setCreateEmail] = useState('');
+  const [createPassword, setCreatePassword] = useState('');
+  const [showCreatePw, setShowCreatePw] = useState(false);
+  const [creatingAdmin, setCreatingAdmin] = useState(false);
 
-          if (active && p) {
-            setAdminUser(p as Profile);
-            setLoading(false);
-            return;
-          }
+  const loadAdmin = useCallback(async () => {
+    setLoading(true);
+    try {
+      if (supabase) {
+        const { data: p } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('tenant_id', t.id)
+          .eq('role', 'tenant_admin')
+          .maybeSingle();
+
+        if (p) {
+          setAdminUser(p as Profile);
+          setLoading(false);
+          return;
         }
-        const dump = await fetchTenantDump(t.id);
-        if (active) {
-          const found = dump.profiles.find(x => x.role === 'tenant_admin') || dump.profiles[0] || null;
-          setAdminUser(found);
-        }
-      } catch (e) {
-        console.warn('Error cargando administrador del tenant:', e);
-      } finally {
-        if (active) setLoading(false);
       }
-    })();
-    return () => { active = false; };
+      const dump = await fetchTenantDump(t.id);
+      const found = dump.profiles.find(x => x.role === 'tenant_admin') || dump.profiles[0] || null;
+      setAdminUser(found);
+    } catch (e) {
+      console.warn('Error cargando administrador del tenant:', e);
+    } finally {
+      setLoading(false);
+    }
   }, [t.id, fetchTenantDump]);
+
+  useEffect(() => {
+    loadAdmin();
+  }, [loadAdmin]);
+
+  const handleCreateAndAssignAdmin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = createName.trim();
+    const email = createEmail.trim().toLowerCase();
+    const pw = createPassword.trim();
+
+    if (name.length < 3) {
+      toast('err', 'El nombre completo debe tener al menos 3 caracteres.');
+      return;
+    }
+    if (!isEmail(email)) {
+      toast('err', 'Ingrese un correo electrónico válido.');
+      return;
+    }
+    if (pw.length < 6) {
+      toast('err', 'La contraseña inicial debe tener al menos 6 caracteres.');
+      return;
+    }
+
+    setCreatingAdmin(true);
+    try {
+      let token = '';
+      if (supabase) {
+        const { data: s } = await supabase.auth.getSession();
+        token = s.session?.access_token || '';
+      }
+
+      const res = await fetch('/api/admin/create-tenant-admin', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          tenantId: t.id,
+          fullName: name,
+          email,
+          password: pw,
+        }),
+      });
+
+      const json = await res.json();
+      if (!res.ok) {
+        toast('err', json.error || 'Error al crear o vincular administrador.');
+      } else {
+        toast('ok', json.message || 'Administrador asignado con éxito.');
+        if (json.user) {
+          setAdminUser(json.user as Profile);
+        } else {
+          await loadAdmin();
+        }
+        setLastAssignedPassword(pw);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error inesperado';
+      toast('err', `Falla de red: ${msg}`);
+    } finally {
+      setCreatingAdmin(false);
+    }
+  };
 
   const copyWhatsAppKit = () => {
     if (!adminUser) return;
@@ -465,7 +531,7 @@ function TenantAccessModal({ t, onClose }: { t: Tenant; onClose: () => void }) {
     setTimeout(() => setCopiedKit(false), 3000);
   };
 
-  const handleManualReset = async (e: React.FormEvent) => {
+  const handleForceResetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!adminUser) {
       toast('err', 'No hay usuario administrador identificado.');
@@ -473,7 +539,7 @@ function TenantAccessModal({ t, onClose }: { t: Tenant; onClose: () => void }) {
     }
     const cleanPw = newPassword.trim();
     if (cleanPw.length < 6) {
-      toast('err', 'La contraseña manual debe tener al menos 6 caracteres.');
+      toast('err', 'La nueva contraseña debe tener al menos 6 caracteres.');
       return;
     }
 
@@ -485,15 +551,15 @@ function TenantAccessModal({ t, onClose }: { t: Tenant; onClose: () => void }) {
         token = s.session?.access_token || '';
       }
 
-      const res = await fetch('/api/admin/reset-password', {
+      const res = await fetch('/api/admin/force-reset-password', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
-          user_id: adminUser.id,
-          password: cleanPw,
+          userId: adminUser.id,
+          newPassword: cleanPw,
         }),
       });
 
@@ -501,7 +567,7 @@ function TenantAccessModal({ t, onClose }: { t: Tenant; onClose: () => void }) {
       if (!res.ok) {
         toast('err', json.error || 'Error al actualizar contraseña.');
       } else {
-        toast('ok', `Contraseña de ${adminUser.full_name} actualizada con éxito.`);
+        toast('ok', `Contraseña actualizada con éxito para ${adminUser.email}`);
         setLastAssignedPassword(cleanPw);
         setNewPassword('');
       }
@@ -511,6 +577,24 @@ function TenantAccessModal({ t, onClose }: { t: Tenant; onClose: () => void }) {
     } finally {
       setResetting(false);
     }
+  };
+
+  const copyCredentialsKit = () => {
+    if (!adminUser || !lastAssignedPassword) return;
+    const rawEnv = process.env.NEXT_PUBLIC_SITE_URL;
+    const cleanEnv = rawEnv ? rawEnv.match(/https?:\/\/[^\s\]\)\"\'\,]+/)?.[0]?.replace(/\/$/, '') || rawEnv.trim().replace(/\/$/, '') : '';
+    const siteUrl = cleanEnv
+      || (typeof window !== 'undefined' ? window.location.origin : 'https://c-paking-soft.vercel.app');
+
+    const message = `¡Hola! Aquí tienes las credenciales de acceso para tu sistema CParkingSoft:
+🌐 Enlace del Sistema: ${siteUrl}
+👤 Correo de Acceso: ${adminUser.email}
+🔑 Nueva Contraseña: ${lastAssignedPassword}`;
+
+    navigator.clipboard.writeText(message);
+    setCopiedPw(true);
+    toast('ok', '¡Credenciales copiadas al portapapeles!');
+    setTimeout(() => setCopiedPw(false), 3000);
   };
 
   const handleSendEmailReset = async () => {
@@ -571,8 +655,80 @@ function TenantAccessModal({ t, onClose }: { t: Tenant; onClose: () => void }) {
           {loading ? (
             <div className="text-xs text-slate-500 py-2">Cargando datos del administrador…</div>
           ) : !adminUser ? (
-            <div className="text-xs text-amber-700 bg-amber-50 p-2.5 rounded-lg border border-amber-200">
-              No se encontró un perfil administrativo asignado a este parqueadero.
+            <div className="space-y-3 pt-1">
+              <div className="text-xs text-amber-800 bg-amber-50 p-2.5 rounded-lg border border-amber-200 flex items-start gap-2">
+                <AlertTriangle size={15} className="text-amber-600 flex-shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold">Sin administrador asignado:</span> No se encontró un perfil administrativo asignado a este parqueadero. Complete el formulario a continuación para crearlo y vincularlo.
+                </div>
+              </div>
+
+              <form onSubmit={handleCreateAndAssignAdmin} className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-3">
+                <div className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                  <UserPlus size={15} className="text-indigo-600" />
+                  Crear y Asignar Administrador Principal
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                    Nombre completo del Administrador
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Ej. Carlos Restrepo"
+                    value={createName}
+                    onChange={e => setCreateName(e.target.value)}
+                    className="w-full border border-slate-300 rounded-lg px-3 py-1.5 text-xs text-slate-900 focus:ring-2 focus:ring-amber-500 outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                    Correo electrónico de acceso
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="admin@parqueadero.com"
+                    value={createEmail}
+                    onChange={e => setCreateEmail(e.target.value)}
+                    className="w-full border border-slate-300 rounded-lg px-3 py-1.5 text-xs text-slate-900 focus:ring-2 focus:ring-amber-500 outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                    Contraseña inicial
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showCreatePw ? 'text' : 'password'}
+                      required
+                      placeholder="Mínimo 6 caracteres"
+                      value={createPassword}
+                      onChange={e => setCreatePassword(e.target.value)}
+                      className="w-full border border-slate-300 rounded-lg pl-3 pr-9 py-1.5 text-xs text-slate-900 focus:ring-2 focus:ring-amber-500 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowCreatePw(!showCreatePw)}
+                      className="absolute inset-y-0 right-0 pr-2.5 flex items-center text-slate-400 hover:text-slate-600 focus:outline-none"
+                    >
+                      {showCreatePw ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                </div>
+
+                <Btn
+                  type="submit"
+                  disabled={creatingAdmin}
+                  className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs py-2 shadow-sm flex items-center justify-center gap-1.5"
+                >
+                  <UserPlus size={14} />
+                  {creatingAdmin ? 'Creando y vinculando…' : '+ Crear y Vincular Administrador'}
+                </Btn>
+              </form>
             </div>
           ) : (
             <div className="grid sm:grid-cols-2 gap-2 text-xs">
@@ -583,6 +739,10 @@ function TenantAccessModal({ t, onClose }: { t: Tenant; onClose: () => void }) {
               <div>
                 <span className="text-slate-400 block">Correo de acceso:</span>
                 <span className="font-semibold text-slate-900 font-mono">{adminUser.email}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block">UID del Administrador (Auth):</span>
+                <span className="font-mono text-[11px] text-slate-600 select-all break-all">{adminUser.id}</span>
               </div>
               <div>
                 <span className="text-slate-400 block">Rol en el sistema:</span>
@@ -617,20 +777,20 @@ function TenantAccessModal({ t, onClose }: { t: Tenant; onClose: () => void }) {
               {copiedKit ? '¡Copiado al Portapapeles!' : '📋 Copiar Kit de Acceso para WhatsApp'}
             </button>
 
-            {/* b) Sección Resetear Contraseña Manual */}
-            <form onSubmit={handleManualReset} className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
-              <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
-                <KeyRound size={14} className="text-amber-600" />
-                Resetear Contraseña Administrativa
+            {/* b) Sección Cambiar Contraseña Manualmente (Acceso Desarrollador) */}
+            <form onSubmit={handleForceResetPassword} className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
+                <KeyRound size={15} className="text-amber-600" />
+                Cambiar Contraseña Manualmente (Acceso Desarrollador)
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-col sm:flex-row gap-2">
                 <div className="relative flex-1">
                   <input
                     type={showPassword ? 'text' : 'password'}
-                    placeholder="Nueva contraseña (mín. 6)"
+                    placeholder="Digita la nueva clave (ej: Fabricato2026*)"
                     value={newPassword}
                     onChange={e => setNewPassword(e.target.value)}
-                    className="w-full border border-slate-300 rounded-lg pl-3 pr-9 py-1.5 text-xs text-slate-900 focus:ring-2 focus:ring-amber-500 outline-none"
+                    className="w-full border border-slate-300 rounded-lg pl-3 pr-9 py-2 text-xs text-slate-900 focus:ring-2 focus:ring-amber-500 outline-none"
                   />
                   <button
                     type="button"
@@ -643,24 +803,34 @@ function TenantAccessModal({ t, onClose }: { t: Tenant; onClose: () => void }) {
                 <Btn
                   type="submit"
                   disabled={resetting || newPassword.trim().length < 6}
-                  className="bg-slate-900 hover:bg-slate-800 text-white text-xs px-3 py-1.5 font-semibold"
+                  className="bg-slate-900 hover:bg-slate-800 text-white text-xs px-3.5 py-2 font-semibold flex items-center justify-center gap-1.5 whitespace-nowrap shadow-sm"
                 >
-                  {resetting ? 'Guardando…' : 'Establecer'}
+                  <Save size={13} />
+                  {resetting ? 'Aplicando…' : '💾 Aplicar Nueva Clave'}
                 </Btn>
               </div>
 
               {lastAssignedPassword && (
-                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2 flex items-center justify-between text-xs text-emerald-900">
-                  <div className="truncate">
-                    <b>Clave asignada:</b> <code className="bg-white px-1.5 py-0.5 rounded border border-emerald-300 font-bold">{lastAssignedPassword}</code>
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 space-y-2 text-xs text-emerald-900">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-slate-500">Clave establecida:</span>{' '}
+                      <code className="bg-white px-2 py-0.5 rounded border border-emerald-300 font-bold font-mono text-slate-900">
+                        {lastAssignedPassword}
+                      </code>
+                    </div>
+                    <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                      ✓ Actualizada
+                    </span>
                   </div>
+
                   <button
                     type="button"
-                    onClick={() => copyPassword(lastAssignedPassword)}
-                    className="ml-2 text-emerald-700 hover:text-emerald-900 font-bold flex items-center gap-1 flex-shrink-0"
+                    onClick={copyCredentialsKit}
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-1.5 px-3 rounded-lg flex items-center justify-center gap-1.5 text-xs shadow-sm transition"
                   >
-                    {copiedPw ? <Check size={13} /> : <Copy size={13} />}
-                    {copiedPw ? 'Copiada' : 'Copiar'}
+                    {copiedPw ? <Check size={14} /> : <Copy size={14} />}
+                    {copiedPw ? '¡Credenciales Copiadas!' : '📋 Copiar credenciales para enviar al cliente'}
                   </button>
                 </div>
               )}
