@@ -4,6 +4,7 @@ import QRCode from 'qrcode';
 import type { CashShift, ParkingRecord, Tenant } from '@/lib/types';
 import { durText, fmtDate, fmtDT, fmtTime, money } from '@/lib/format';
 import { displayPlate } from '@/lib/validators';
+import { Logo } from './Logo';
 
 export type PrintDocT =
   | { kind: 'ticket'; record: ParkingRecord }
@@ -25,11 +26,7 @@ export function ThermalDoc({ doc, tenant }: { doc: PrintDocT; tenant: Tenant }) 
   const Head = () => (
     <>
       <div style={{ textAlign: 'center', marginBottom: 4 }}>
-        <img
-          src="/CparkingSoftLogo.jpg"
-          alt="CParkingSoft"
-          style={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 6, margin: '0 auto', display: 'block' }}
-        />
+        <Logo variant="ticket" size={36} className="mx-auto block" />
         <div style={{ fontSize: 10, fontWeight: 'bold', letterSpacing: 0.5, marginTop: 2 }}>CParkingSoft</div>
       </div>
       <div className="c b" style={{ fontSize: 12 }}>{tenant.business_name.toUpperCase()}</div>
