@@ -61,9 +61,13 @@ export default function ResetPasswordPage() {
       <div className="flex-1 grid place-items-center">
         <Card className="w-full max-w-md p-6 sm:p-8 shadow-xl border-slate-200 bg-white">
           <div className="flex flex-col items-center mb-6 text-center">
-            <Logo variant="icon" size={54} className="mb-2 shadow-md rounded-2xl" />
-            <h1 className="text-2xl font-black tracking-tight" style={{ color: '#1E3A8A' }}>
-              CParking<span style={{ color: '#D97706' }}>Soft</span>
+            <img
+              src="/CparkingSoftLogo.jpg"
+              alt="CParkingSoft Logo"
+              className="h-16 w-auto mx-auto object-contain mb-3"
+            />
+            <h1 className="text-2xl font-black tracking-tight text-slate-900">
+              CParkingSoft
             </h1>
             <p className="text-xs font-medium text-slate-500 mt-1">
               Restablecer Contraseña

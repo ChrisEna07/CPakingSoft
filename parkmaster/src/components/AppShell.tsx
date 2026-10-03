@@ -63,7 +63,11 @@ export function AppShell() {
           <header className="bg-slate-900 shadow-lg border-b border-slate-800">
             <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3">
-                <Logo variant="icon" size={40} className="shadow rounded-xl flex-shrink-0" />
+                <img
+                  src="/CparkingSoftLogo.jpg"
+                  alt="CParkingSoft Logo"
+                  className="h-10 w-10 rounded-xl object-cover border border-slate-700 shadow"
+                />
                 <div>
                   <h1 className="text-lg sm:text-2xl font-bold text-white flex items-center gap-2">
                     <span>{tenant ? tenant.business_name : 'CParkingSoft SaaS'}</span>

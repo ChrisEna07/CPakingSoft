@@ -1,13 +1,12 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { LogIn, Eye, EyeOff, KeyRound, Mail, X } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { isEmail } from '@/lib/validators';
 import { supabase } from '@/lib/supabase';
 import { Btn, Card, TextInput } from './ui';
-import { Logo } from './Logo';
 import { Footer } from './Footer';
 
 export function Login() {
@@ -24,6 +23,11 @@ export function Login() {
   const [recoveryEmail, setRecoveryEmail] = useState('');
   const [sendingRecovery, setSendingRecovery] = useState(false);
 
+  // 3. Log de debug temporal
+  useEffect(() => {
+    console.log('Supabase URL cargada:', !!process.env.NEXT_PUBLIC_SUPABASE_URL);
+  }, []);
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const rawInput = identifier.trim();
@@ -32,7 +36,7 @@ export function Login() {
       return;
     }
 
-    // 4. MAPEO TRANSPARENTE: ChrizDev07 -> christianjoroce@gmail.com
+    // Mapeo transparente: ChrizDev07 -> christianjoroce@gmail.com
     let resolvedEmail = rawInput;
     if (rawInput.toLowerCase() === 'chrizdev07') {
       resolvedEmail = 'christianjoroce@gmail.com';
@@ -75,12 +79,7 @@ export function Login() {
 
     setSendingRecovery(true);
     try {
-      if (!supabase) {
-        toast('info', 'Supabase en modo desconectado. Operación no disponible localmente.');
-        setSendingRecovery(false);
-        return;
-      }
-
+      // 2. Ejecutar directamente sin bloqueo de modo local
       const { error } = await supabase.auth.resetPasswordForEmail(mail, {
         redirectTo: `${window.location.origin}/reset-password`,
       });
@@ -104,11 +103,15 @@ export function Login() {
     <div className="min-h-screen flex flex-col justify-between p-4 bg-slate-50">
       <div className="flex-1 grid place-items-center">
         <Card className="w-full max-w-md p-6 sm:p-8 shadow-xl border-slate-200 bg-white">
-          {/* Logo SVG Corporativo */}
+          {/* 1. Logo oficial de CParkingSoft */}
           <div className="flex flex-col items-center mb-6 text-center">
-            <Logo variant="icon" size={54} className="mb-2 shadow-md rounded-2xl" />
-            <h1 className="text-2xl font-black tracking-tight" style={{ color: '#1E3A8A' }}>
-              CParking<span style={{ color: '#D97706' }}>Soft</span>
+            <img
+              src="/CparkingSoftLogo.jpg"
+              alt="CParkingSoft Logo"
+              className="h-16 w-auto mx-auto object-contain mb-3"
+            />
+            <h1 className="text-2xl font-black tracking-tight text-slate-900">
+              CParkingSoft
             </h1>
             <p className="text-xs font-medium text-slate-500 mt-1">
               Control Integral de Parqueaderos · SaaS Multi-Tenant
