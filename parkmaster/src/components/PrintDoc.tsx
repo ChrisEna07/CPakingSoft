@@ -67,10 +67,37 @@ export function ThermalDoc({ doc, tenant }: { doc: PrintDocT; tenant: Tenant }) 
         <div className="c b">RECIBO DE PAGO</div>
         <div className="code">#{r.ticket_code}</div>
         <div className="plate">{displayPlate(r.plate)}</div>
+        {r.lost_ticket && (
+          <div className="c b" style={{ background: '#000', color: '#fff', padding: '2px 4px', margin: '4px 0', fontSize: 11 }}>
+            SALIDA POR TIQUETE PERDIDO
+          </div>
+        )}
         <div className="row"><span>Entrada</span><b>{fmtDT(r.entry_time)}</b></div>
         <div className="row"><span>Salida</span><b>{r.exit_time ? fmtDT(r.exit_time) : '-'}</b></div>
-        <div className="row"><span>Tiempo</span><b>{durText(r.total_minutes ?? 0)}</b></div>
-        <div className="row"><span>Horas cobradas</span><b>{r.billed_hours ?? 0}</b></div>
+        {!r.lost_ticket && (
+          <>
+            <div className="row"><span>Tiempo</span><b>{durText(r.total_minutes ?? 0)}</b></div>
+            <div className="row"><span>Horas cobradas</span><b>{r.billed_hours ?? 0}</b></div>
+          </>
+        )}
+        {r.agreement_name && (
+          <div className="row"><span>Convenio</span><b>{r.agreement_name}</b></div>
+        )}
+        {r.validation_code && (
+          <div className="row"><span>Comprobante</span><b>{r.validation_code}</b></div>
+        )}
+        {Boolean(r.gross_amount && r.discount_applied_cop && r.discount_applied_cop > 0) && (
+          <>
+            <div className="row"><span>Tarifa plena</span><span>{money(r.gross_amount ?? 0)}</span></div>
+            <div className="row" style={{ color: '#059669' }}><span>Ahorro / Dcto</span><span>-{money(r.discount_applied_cop ?? 0)}</span></div>
+          </>
+        )}
+        {r.lost_ticket && r.lost_ticket_holder_name && (
+          <div className="c small" style={{ margin: '4px 0', textAlign: 'left' }}>
+            <div>Retirado por: <b>{r.lost_ticket_holder_name}</b></div>
+            <div>Documento: <b>{r.lost_ticket_holder_doc}</b></div>
+          </div>
+        )}
         <hr />
         <div className="row b" style={{ fontSize: 15 }}><span>TOTAL</span><span>{money(r.total_amount)} COP</span></div>
         <div className="row"><span>Pago</span><b>{r.payment_method}</b></div>

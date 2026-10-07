@@ -57,7 +57,16 @@ create table if not exists public.parking_records (
   total_minutes  int,
   billed_hours   int,
   total_amount   numeric(12,0),
+  gross_amount   numeric(12,0),
+  discount_applied_cop numeric(12,0) default 0,
   payment_method text check (payment_method in ('efectivo','transferencia','cortesia')),
+  agreement_id   uuid,
+  agreement_name text,
+  validation_code text,
+  subscription_id uuid,
+  lost_ticket    boolean not null default false,
+  lost_ticket_holder_name text,
+  lost_ticket_holder_doc text,
   created_by     uuid references public.profiles(id),
   closed_by      uuid references public.profiles(id),
   sync_status    text not null default 'synced' check (sync_status in ('synced','pending')),
@@ -69,18 +78,50 @@ create unique index if not exists one_active_plate_per_tenant
 create index if not exists records_tenant_entry_idx on public.parking_records(tenant_id, entry_time desc);
 
 create table if not exists public.cash_shifts (
-  id                     uuid primary key,
-  tenant_id              uuid not null references public.tenants(id) on delete cascade,
-  cashier_id             uuid not null references public.profiles(id),
-  opened_at              timestamptz not null,
-  closed_at              timestamptz,
-  initial_base_cash      numeric(12,0) not null default 0,
-  system_calculated_cash numeric(12,0),
-  reported_cash          numeric(12,0),
-  difference             numeric(12,0),
-  status                 text not null default 'abierto' check (status in ('abierto','cerrado'))
+  id                         uuid primary key,
+  tenant_id                  uuid not null references public.tenants(id) on delete cascade,
+  cashier_id                 uuid not null references public.profiles(id),
+  opened_at                  timestamptz not null,
+  closed_at                  timestamptz,
+  initial_base_cash          numeric(12,0) not null default 0,
+  system_calculated_cash     numeric(12,0),
+  reported_cash              numeric(12,0),
+  difference                 numeric(12,0),
+  status                     text not null default 'abierto' check (status in ('abierto','cerrado')),
+  vehicles_in_patio_at_close int default 0,
+  open_tickets_audit         jsonb default '[]'::jsonb
 );
 create index if not exists shifts_tenant_idx on public.cash_shifts(tenant_id, opened_at desc);
+
+create table if not exists public.commercial_agreements (
+  id                        uuid primary key default gen_random_uuid(),
+  tenant_id                 uuid not null references public.tenants(id) on delete cascade,
+  name                      text not null,
+  agreement_type            text not null check (agreement_type in ('porcentaje','tiempo_gratis','tarifa_fija')),
+  discount_value            numeric(10,2) not null,
+  vehicle_type_applicable  text not null default 'todos' check (vehicle_type_applicable in ('todos','moto','carro')),
+  requires_validation_code  boolean not null default false,
+  active                    boolean not null default true,
+  created_at                timestamptz not null default now()
+);
+create index if not exists agreements_tenant_idx on public.commercial_agreements(tenant_id, active);
+
+create table if not exists public.monthly_subscriptions (
+  id                uuid primary key default gen_random_uuid(),
+  tenant_id         uuid not null references public.tenants(id) on delete cascade,
+  customer_name     text not null,
+  document_id       text not null,
+  phone             text not null,
+  plate             varchar(10) not null,
+  vehicle_type      text not null check (vehicle_type in ('moto','carro')),
+  monthly_rate_cop  numeric(12,0) not null default 0,
+  start_date        date not null,
+  end_date          date not null,
+  status            text not null default 'vigente' check (status in ('vigente','vencido','suspendido')),
+  created_at        timestamptz not null default now(),
+  constraint plate_unique_per_tenant unique (tenant_id, plate)
+);
+create index if not exists subscriptions_tenant_idx on public.monthly_subscriptions(tenant_id, plate);
 
 create table if not exists public.support_tickets (
   id                uuid primary key,
@@ -233,6 +274,30 @@ drop policy if exists support_update on public.support_tickets;
 create policy support_update on public.support_tickets for update
   using (public.is_superadmin()) with check (public.is_superadmin());
 
+-- commercial_agreements
+alter table public.commercial_agreements enable row level security;
+drop policy if exists agreements_select on public.commercial_agreements;
+create policy agreements_select on public.commercial_agreements for select
+  using (public.is_superadmin() or tenant_id = public.auth_tenant_id());
+drop policy if exists agreements_insert on public.commercial_agreements;
+create policy agreements_insert on public.commercial_agreements for insert
+  with check (tenant_id = public.auth_tenant_id());
+drop policy if exists agreements_update on public.commercial_agreements;
+create policy agreements_update on public.commercial_agreements for update
+  using (tenant_id = public.auth_tenant_id()) with check (tenant_id = public.auth_tenant_id());
+
+-- monthly_subscriptions
+alter table public.monthly_subscriptions enable row level security;
+drop policy if exists subscriptions_select on public.monthly_subscriptions;
+create policy subscriptions_select on public.monthly_subscriptions for select
+  using (public.is_superadmin() or tenant_id = public.auth_tenant_id());
+drop policy if exists subscriptions_insert on public.monthly_subscriptions;
+create policy subscriptions_insert on public.monthly_subscriptions for insert
+  with check (tenant_id = public.auth_tenant_id());
+drop policy if exists subscriptions_update on public.monthly_subscriptions;
+create policy subscriptions_update on public.monthly_subscriptions for update
+  using (tenant_id = public.auth_tenant_id()) with check (tenant_id = public.auth_tenant_id());
+
 -- legal_acceptances (Auditoría legal inmutable)
 alter table public.legal_acceptances enable row level security;
 drop policy if exists legal_select on public.legal_acceptances;
@@ -253,6 +318,12 @@ do $$ begin
 exception when duplicate_object then null; end $$;
 do $$ begin
   alter publication supabase_realtime add table public.tenants;
+exception when duplicate_object then null; end $$;
+do $$ begin
+  alter publication supabase_realtime add table public.commercial_agreements;
+exception when duplicate_object then null; end $$;
+do $$ begin
+  alter publication supabase_realtime add table public.monthly_subscriptions;
 exception when duplicate_object then null; end $$;
 
 -- ---------------------------------------------------------------------

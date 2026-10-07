@@ -23,6 +23,9 @@ export function Login() {
   const [recoveryEmail, setRecoveryEmail] = useState('');
   const [sendingRecovery, setSendingRecovery] = useState(false);
 
+  // Modal de contacto comercial y prueba gratis
+  const [showContactModal, setShowContactModal] = useState(false);
+
   // 3. Log de debug temporal
   useEffect(() => {
     console.log('Supabase URL cargada:', !!process.env.NEXT_PUBLIC_SUPABASE_URL);
@@ -174,8 +177,107 @@ export function Login() {
               {busy ? 'Ingresando…' : 'Iniciar sesión'}
             </Btn>
           </form>
+
+          {/* Banner Comercial de Prueba Gratuita y Contacto Directo */}
+          <div className="mt-6 pt-5 border-t border-slate-100 text-center space-y-2">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50 border border-amber-200 text-amber-900 text-xs font-bold">
+              <span>🚀</span> Prueba Gratuita de 7 Días para tu Parqueadero
+            </div>
+            <p className="text-xs text-slate-500">
+              ¿Quieres digitalizar y controlar los ingresos de tu parqueadero o centro comercial?
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowContactModal(true)}
+              className="text-xs font-bold text-slate-900 hover:text-emerald-700 underline transition inline-flex items-center gap-1 mt-1"
+            >
+              💬 Contactar a Christian Romero (Asesor Comercial & Soporte)
+            </button>
+          </div>
         </Card>
       </div>
+
+      {/* Modal de Contacto Comercial y Prueba Gratuita */}
+      {showContactModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm grid place-items-center p-4" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 border border-slate-100">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-emerald-50 text-emerald-600 rounded-xl">
+                  <span className="text-xl">💼</span>
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-slate-900">
+                    CParkingSoft · Solución Comercial
+                  </h2>
+                  <p className="text-[11px] text-slate-500">Adquiere tu licencia o activa tu piloto gratis</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowContactModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 space-y-1">
+              <div className="font-bold flex items-center gap-1">
+                ⭐ Prueba Piloto de 7 Días sin Compromiso
+              </div>
+              <p className="text-[11px] text-amber-800 leading-relaxed">
+                Prueba todo el sistema con impresión de tiquetes térmicos, arqueo de caja ciego, convenios comerciales y reportes ejecutivos en tu propio negocio.
+              </p>
+            </div>
+
+            <div className="space-y-3 pt-1">
+              <a
+                href="https://wa.me/573183517802?text=%C2%A1Hola%20Christian!%20Estoy%20interesado%20en%20adquirir%20CParkingSoft%20o%20iniciar%20la%20prueba%20gratuita%20de%207%20d%C3%ADas%20para%20mi%20parqueadero."
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow transition"
+              >
+                <span>💬</span> WhatsApp Directo: 318 351 7802
+              </a>
+              <p className="text-[11px] text-center text-slate-400 font-medium">
+                (Atención directa por WhatsApp · Disponible para soporte e implementación)
+              </p>
+
+              <div className="pt-2 border-t border-slate-100 flex flex-col gap-2 text-xs">
+                <a
+                  href="https://christian-romero.vercel.app/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-2.5 rounded-lg border border-slate-200 hover:border-slate-300 bg-slate-50 flex items-center justify-between text-slate-700 font-semibold transition"
+                >
+                  <span>Perfil Profesional · Christian Romero</span>
+                  <span className="text-slate-400 text-sm">↗</span>
+                </a>
+                <a
+                  href="https://my-app-s-portafolio-digital.vercel.app/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-2.5 rounded-lg border border-slate-200 hover:border-slate-300 bg-slate-50 flex items-center justify-between text-slate-700 font-semibold transition"
+                >
+                  <span>Portafolio de Soluciones & Software</span>
+                  <span className="text-slate-400 text-sm">↗</span>
+                </a>
+              </div>
+            </div>
+
+            <div className="pt-2 text-right">
+              <Btn
+                type="button"
+                onClick={() => setShowContactModal(false)}
+                className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-4 py-2"
+              >
+                Cerrar
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal de Recuperación de Contraseña */}
       {showRecovery && (

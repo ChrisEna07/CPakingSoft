@@ -3,19 +3,30 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { supabase } from './supabase';
 import { kvGet, kvSet } from './db';
 import { seedTenants, seedUsers, type LocalUser } from './seed';
-import { liquidate, shiftTotals } from './billing';
+import { addMonthsKey, daysUntil, effectiveSubStatus, findSubscription, liquidate, quoteExit, shiftTotals } from './billing';
 import { displayPlate, normalizePlate, validatePlate } from './validators';
-import { fmtHM, padN, uid } from './format';
+import { dkey, fmtHM, padN, uid } from './format';
 import {
   EMPTY_DATA, DEFAULT_CONFIG,
   type CashShift, type LegalAcceptance, type ParkingRecord, type PaymentMethod, type Profile, type QueueItem, type SupportTicket, type SyncTable,
-  type Tenant, type TenantData, type VehicleType, type Role,
+  type Tenant, type TenantData, type VehicleType, type Role, type CommercialAgreement, type MonthlySubscription, type OpenTicketAudit,
+  type SubscriptionStatus,
 } from './types';
 
 export type ToastKind = 'ok' | 'err' | 'info';
 export interface ToastMsg { id: number; kind: ToastKind; msg: string }
 export interface Session { profile: Profile; tenant: Tenant | null }
 export interface ActionResult<T = undefined> { ok: boolean; kind: ToastKind; message: string; data?: T }
+export interface ExitOptions { agreementId?: string | null; validationCode?: string | null }
+export interface LostTicketInput {
+  recordId?: string | null;       // si el vehículo sí tiene entrada registrada
+  plate: string;
+  vehicleType: VehicleType;
+  holderName: string;
+  holderDoc: string;
+  method: PaymentMethod;
+}
+export interface SubscriptionLookup { sub: MonthlySubscription; state: SubscriptionStatus; daysLeft: number }
 
 interface Ctx {
   ready: boolean;
@@ -33,7 +44,12 @@ interface Ctx {
   logout: () => Promise<void>;
   openShiftOf: () => CashShift | null;
   registerEntry: (plateRaw: string, type: VehicleType) => ActionResult<ParkingRecord>;
-  registerExit: (recordId: string, method: PaymentMethod) => ActionResult<ParkingRecord>;
+  registerExit: (recordId: string, method: PaymentMethod, opts?: ExitOptions) => ActionResult<ParkingRecord>;
+  registerLostTicket: (input: LostTicketInput) => ActionResult<ParkingRecord>;
+  lookupSubscription: (plateRaw: string) => SubscriptionLookup | null;
+  saveAgreement: (a: CommercialAgreement) => ActionResult<CommercialAgreement>;
+  saveSubscription: (s: MonthlySubscription) => ActionResult<MonthlySubscription>;
+  renewSubscription: (id: string) => ActionResult<MonthlySubscription>;
   openShift: (base: number) => ActionResult<CashShift>;
   closeShift: (reported: number) => ActionResult<CashShift>;
   addSupportTicket: (description: string, screenshotName: string | null) => void;
@@ -134,21 +150,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (!supabase || !navigator.onLine) return local;
     try {
       const since = new Date(Date.now() - 30 * 86400000).toISOString();
-      const [a, b, s, t] = await Promise.all([
+      const [a, b, s, t, agr, sub] = await Promise.all([
         supabase.from('parking_records').select('*').eq('tenant_id', tenantId).eq('status', 'dentro'),
         supabase.from('parking_records').select('*').eq('tenant_id', tenantId).neq('status', 'dentro').gte('entry_time', since).limit(5000),
         supabase.from('cash_shifts').select('*').eq('tenant_id', tenantId).gte('opened_at', since),
         supabase.from('support_tickets').select('*').eq('tenant_id', tenantId),
+        supabase.from('commercial_agreements').select('*').eq('tenant_id', tenantId),
+        supabase.from('monthly_subscriptions').select('*').eq('tenant_id', tenantId),
       ]);
       if (a.error || b.error || s.error || t.error) throw new Error('fetch');
       let records = [...(a.data ?? []), ...(b.data ?? [])].map(r => normRecord(r as Record<string, unknown>));
       let shifts = (s.data ?? []).map(x => normShift(x as Record<string, unknown>));
+      let agreements = (agr.data ?? []) as CommercialAgreement[];
+      let subscriptions = (sub.data ?? []) as MonthlySubscription[];
       local.queue.forEach(item => {
         if (item.table === 'parking_records') records = upsertById(records, item.row as ParkingRecord);
         if (item.table === 'cash_shifts') shifts = upsertById(shifts, item.row as CashShift);
+        if (item.table === 'commercial_agreements') agreements = upsertById(agreements, item.row as CommercialAgreement);
+        if (item.table === 'monthly_subscriptions') subscriptions = upsertById(subscriptions, item.row as MonthlySubscription);
       });
       return {
-        records, shifts, tickets: (t.data ?? []) as SupportTicket[], queue: local.queue,
+        records, shifts, tickets: (t.data ?? []) as SupportTicket[],
+        agreements: agreements.length ? agreements : local.agreements,
+        subscriptions: subscriptions.length ? subscriptions : local.subscriptions,
+        queue: local.queue,
         counters: { moto: Math.max(local.counters.moto, maxTicketNumber(records, 'MTO')), carro: Math.max(local.counters.carro, maxTicketNumber(records, 'CAR')) },
       };
     } catch { return local; }
@@ -373,6 +398,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         if (!row || !row.id) return;
         setData(d => (d.queue.some(x => x.row.id === row.id) ? d : { ...d, shifts: upsertById(d.shifts, normShift(row)) }));
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'commercial_agreements', filter: `tenant_id=eq.${tid}` }, p => {
+        const row = p.new as CommercialAgreement;
+        if (!row || !row.id) return;
+        setData(d => (d.queue.some(x => x.row.id === row.id) ? d : { ...d, agreements: upsertById(d.agreements, row) }));
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'monthly_subscriptions', filter: `tenant_id=eq.${tid}` }, p => {
+        const row = p.new as MonthlySubscription;
+        if (!row || !row.id) return;
+        setData(d => (d.queue.some(x => x.row.id === row.id) ? d : { ...d, subscriptions: upsertById(d.subscriptions, row) }));
+      })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'tenants', filter: `id=eq.${tid}` }, p => {
         setSession(s => (s ? { ...s, tenant: normTenant(p.new as Record<string, unknown>) } : s));
       })
@@ -401,34 +436,203 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (dup) return fail(`Error al ingresar vehículo: La placa ${displayPlate(plate)} ya registra una entrada activa a las ${fmtHM(dup.entry_time)} sin registrar salida. Verifique si el vehículo sigue en patio.`);
     const inside = d.records.filter(r => r.status === 'dentro' && r.vehicle_type === type).length;
     if (inside >= (type === 'moto' ? cfg.cap_moto : cfg.cap_carro)) return fail(`Error al ingresar vehículo: Capacidad máxima de ${type === 'moto' ? 'motos' : 'carros'} alcanzada.`);
+    
+    // Verificación de mensualidad / abonado
+    const subMatch = findSubscription(d.subscriptions, plate);
+    const isSubActive = subMatch ? effectiveSubStatus(subMatch) === 'vigente' : false;
+
     const tag = type === 'moto' ? 'MTO' : 'CAR';
     const n = Math.max(d.counters[type], maxTicketNumber(d.records, tag)) + 1;
     const rec: ParkingRecord = {
       id: uid(), tenant_id: s.tenant.id, ticket_code: `${cfg.ticket_prefix}-${tag}-${padN(n, 4)}`, plate, vehicle_type: type,
       entry_time: new Date().toISOString(), exit_time: null, status: 'dentro', total_minutes: null, billed_hours: null, total_amount: null,
-      payment_method: null, created_by: s.profile.id, closed_by: null, sync_status: 'pending',
+      payment_method: null, subscription_id: isSubActive && subMatch ? subMatch.id : null,
+      created_by: s.profile.id, closed_by: null, sync_status: 'pending',
     };
     setData(x => ({ ...x, counters: { ...x.counters, [type]: n } }));
     pushRecord(rec);
-    return ok(`Entrada registrada con éxito: ${type === 'moto' ? 'Moto' : 'Carro'} placa ${displayPlate(plate)}. Tiquete #${rec.ticket_code} generado.`, rec);
+
+    const subMsg = isSubActive && subMatch ? ` · ABONADO MENSUAL VIGENTE (${subMatch.customer_name})` : '';
+    return ok(`Entrada registrada con éxito: ${type === 'moto' ? 'Moto' : 'Carro'} placa ${displayPlate(plate)}. Tiquete #${rec.ticket_code} generado.${subMsg}`, rec);
   }, [openShiftOf]);
 
-  const registerExit = useCallback((recordId: string, method: PaymentMethod): ActionResult<ParkingRecord> => {
+  const lookupSubscription = useCallback((plateRaw: string): SubscriptionLookup | null => {
+    const p = normalizePlate(plateRaw);
+    const sub = findSubscription(dataRef.current.subscriptions, p);
+    if (!sub) return null;
+    return {
+      sub,
+      state: effectiveSubStatus(sub),
+      daysLeft: daysUntil(sub.end_date),
+    };
+  }, []);
+
+  const registerExit = useCallback((recordId: string, method: PaymentMethod, opts?: ExitOptions): ActionResult<ParkingRecord> => {
     const s = sessionRef.current; const d = dataRef.current;
     if (!s?.tenant) return fail('No hay un parqueadero asociado a su usuario.');
     const rec = d.records.find(r => r.id === recordId && r.status === 'dentro');
     if (!rec) return fail('Error al registrar salida: el vehículo ya no figura dentro del parqueadero (posiblemente cobrado desde otra caja).');
-    const L = liquidate(rec.entry_time, rec.vehicle_type, s.tenant.config_json, Date.now());
-    if (L.amount > 0 && !openShiftOf()) return fail('Turno no iniciado: Debe abrir turno con la base de efectivo antes de cobrar.', 'info');
+    
+    const agreement = opts?.agreementId ? d.agreements.find(a => a.id === opts.agreementId) ?? null : null;
+    const subscription = findSubscription(d.subscriptions, rec.plate);
+    const quote = quoteExit(rec, s.tenant.config_json, Date.now(), agreement, subscription);
+
+    if (quote.net > 0 && !openShiftOf()) return fail('Turno no iniciado: Debe abrir turno con la base de efectivo antes de cobrar.', 'info');
+    
+    let resolvedMethod: PaymentMethod = method;
+    if (quote.subscription || quote.net === 0) {
+      resolvedMethod = 'cortesia';
+    }
+
     const out: ParkingRecord = {
-      ...rec, exit_time: new Date().toISOString(), status: 'cobrado', total_minutes: L.total_minutes, billed_hours: L.billed_hours,
-      total_amount: L.amount, payment_method: L.amount > 0 ? method : 'cortesia', closed_by: s.profile.id, sync_status: 'pending',
+      ...rec,
+      exit_time: new Date().toISOString(),
+      status: 'cobrado',
+      total_minutes: quote.total_minutes,
+      billed_hours: quote.billed_hours,
+      total_amount: quote.net,
+      gross_amount: quote.gross,
+      discount_applied_cop: quote.discount,
+      agreement_id: quote.agreement?.id ?? null,
+      agreement_name: quote.agreement?.name ?? null,
+      validation_code: opts?.validationCode ?? null,
+      subscription_id: quote.subscription?.id ?? rec.subscription_id ?? null,
+      payment_method: resolvedMethod,
+      closed_by: s.profile.id,
+      sync_status: 'pending',
     };
     pushRecord(out);
-    return ok(L.amount > 0
-      ? `Salida registrada: placa ${displayPlate(rec.plate)} · cobro $${L.amount.toLocaleString('es-CO')} COP (${method}).`
+
+    if (quote.subscription) {
+      return ok(`Salida registrada (Abonado mensual ${quote.subscription.customer_name}): placa ${displayPlate(rec.plate)} sin cobro ($0 COP).`, out);
+    }
+    if (quote.discount > 0) {
+      return ok(`Salida registrada con convenio (${quote.agreement?.name}): placa ${displayPlate(rec.plate)} · total $${quote.net.toLocaleString('es-CO')} COP (ahorro $${quote.discount.toLocaleString('es-CO')} COP).`, out);
+    }
+    return ok(quote.net > 0
+      ? `Salida registrada: placa ${displayPlate(rec.plate)} · cobro $${quote.net.toLocaleString('es-CO')} COP (${resolvedMethod}).`
       : `Salida registrada: placa ${displayPlate(rec.plate)} dentro del período de gracia, sin cobro.`, out);
   }, [openShiftOf]);
+
+  const registerLostTicket = useCallback((input: LostTicketInput): ActionResult<ParkingRecord> => {
+    const s = sessionRef.current; const d = dataRef.current;
+    if (!s?.tenant) return fail('No hay un parqueadero asociado a su usuario.');
+    if (!openShiftOf()) return fail('Turno no iniciado: Debe abrir turno antes de liquidar salidas.', 'info');
+    
+    const plate = normalizePlate(input.plate);
+    const err = validatePlate(plate, input.vehicleType);
+    if (err) return fail(`Placa inválida: ${err}`);
+    if (!input.holderName.trim()) return fail('Debe registrar el nombre de la persona que retira el vehículo.');
+    if (!input.holderDoc.trim()) return fail('Debe registrar el documento de identidad de quien retira el vehículo.');
+
+    const cfg = s.tenant.config_json;
+    const fee = cfg.lost_ticket_fee ?? 15000;
+    const nowIso = new Date().toISOString();
+
+    const existing = input.recordId ? d.records.find(r => r.id === input.recordId && r.status === 'dentro')
+      : d.records.find(r => r.plate === plate && r.status === 'dentro');
+
+    let rec: ParkingRecord;
+    if (existing) {
+      rec = {
+        ...existing,
+        exit_time: nowIso,
+        status: 'cobrado',
+        total_amount: fee,
+        gross_amount: fee,
+        discount_applied_cop: 0,
+        lost_ticket: true,
+        lost_ticket_holder_name: input.holderName.trim(),
+        lost_ticket_holder_doc: input.holderDoc.trim(),
+        payment_method: input.method,
+        closed_by: s.profile.id,
+        sync_status: 'pending',
+      };
+    } else {
+      const tag = input.vehicleType === 'moto' ? 'MTO' : 'CAR';
+      const n = Math.max(d.counters[input.vehicleType], maxTicketNumber(d.records, tag)) + 1;
+      rec = {
+        id: uid(),
+        tenant_id: s.tenant.id,
+        ticket_code: `${cfg.ticket_prefix}-${tag}-${padN(n, 4)}-TP`,
+        plate,
+        vehicle_type: input.vehicleType,
+        entry_time: nowIso,
+        exit_time: nowIso,
+        status: 'cobrado',
+        total_minutes: 0,
+        billed_hours: 0,
+        total_amount: fee,
+        gross_amount: fee,
+        discount_applied_cop: 0,
+        lost_ticket: true,
+        lost_ticket_holder_name: input.holderName.trim(),
+        lost_ticket_holder_doc: input.holderDoc.trim(),
+        payment_method: input.method,
+        created_by: s.profile.id,
+        closed_by: s.profile.id,
+        sync_status: 'pending',
+      };
+      setData(x => ({ ...x, counters: { ...x.counters, [input.vehicleType]: n } }));
+    }
+
+    pushRecord(rec);
+    return ok(`Salida por tiquete perdido registrada: placa ${displayPlate(plate)} · tarifa de sanción $${fee.toLocaleString('es-CO')} COP (${input.method}). Responsable: ${input.holderName.trim()}.`, rec);
+  }, [openShiftOf]);
+
+  const saveAgreement = useCallback((a: CommercialAgreement): ActionResult<CommercialAgreement> => {
+    const s = sessionRef.current;
+    if (!s?.tenant) return fail('No hay un parqueadero asociado a su usuario.');
+    const updated: CommercialAgreement = { ...a, tenant_id: s.tenant.id };
+    setData(d => ({
+      ...d,
+      agreements: upsertById(d.agreements, updated),
+      queue: enqueue(d.queue, 'commercial_agreements', updated),
+    }));
+    return ok('Convenio comercial guardado con éxito.', updated);
+  }, []);
+
+  const saveSubscription = useCallback((sub: MonthlySubscription): ActionResult<MonthlySubscription> => {
+    const s = sessionRef.current;
+    if (!s?.tenant) return fail('No hay un parqueadero asociado a su usuario.');
+    const plate = normalizePlate(sub.plate);
+    const err = validatePlate(plate, sub.vehicle_type);
+    if (err) return fail(`Placa inválida: ${err}`);
+    
+    // Verificar si ya existe esa placa en otra suscripción activa
+    const dup = dataRef.current.subscriptions.find(x => x.id !== sub.id && normalizePlate(x.plate) === plate);
+    if (dup) return fail(`Ya existe un abonado registrado con la placa ${displayPlate(plate)} (${dup.customer_name}).`);
+
+    const updated: MonthlySubscription = {
+      ...sub,
+      tenant_id: s.tenant.id,
+      plate,
+      status: effectiveSubStatus({ ...sub, plate }),
+    };
+    setData(d => ({
+      ...d,
+      subscriptions: upsertById(d.subscriptions, updated),
+      queue: enqueue(d.queue, 'monthly_subscriptions', updated),
+    }));
+    return ok('Mensualidad / Abonado guardado con éxito.', updated);
+  }, []);
+
+  const renewSubscription = useCallback((id: string): ActionResult<MonthlySubscription> => {
+    const sub = dataRef.current.subscriptions.find(x => x.id === id);
+    if (!sub) return fail('Abonado no encontrado.');
+    const nextEnd = addMonthsKey(sub.end_date, 1);
+    const renewed: MonthlySubscription = {
+      ...sub,
+      end_date: nextEnd,
+      status: 'vigente',
+    };
+    setData(d => ({
+      ...d,
+      subscriptions: upsertById(d.subscriptions, renewed),
+      queue: enqueue(d.queue, 'monthly_subscriptions', renewed),
+    }));
+    return ok(`Mensualidad renovada por 1 mes hasta ${renewed.end_date} para la placa ${displayPlate(renewed.plate)}.`, renewed);
+  }, []);
 
   const openShift = useCallback((base: number): ActionResult<CashShift> => {
     const s = sessionRef.current;
@@ -443,9 +647,29 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const closeShift = useCallback((reported: number): ActionResult<CashShift> => {
     const sh = openShiftOf();
     if (!sh) return fail('No hay un turno abierto para cerrar.', 'info');
+    
+    // Vehículos en patio al momento del cierre (Pernocta / Rotación de turno)
+    const pendingInPatio = dataRef.current.records.filter(r => r.status === 'dentro');
+    const patioCount = pendingInPatio.length;
+    const auditTickets: OpenTicketAudit[] = pendingInPatio.map(r => ({
+      ticket_code: r.ticket_code,
+      plate: r.plate,
+      vehicle_type: r.vehicle_type,
+      entry_time: r.entry_time,
+    }));
+
     const t = shiftTotals(sh, dataRef.current.records);
     const expected = sh.initial_base_cash + t.cash;
-    const closed: CashShift = { ...sh, closed_at: new Date().toISOString(), system_calculated_cash: expected, reported_cash: reported, difference: reported - expected, status: 'cerrado' };
+    const closed: CashShift = {
+      ...sh,
+      closed_at: new Date().toISOString(),
+      system_calculated_cash: expected,
+      reported_cash: reported,
+      difference: reported - expected,
+      status: 'cerrado',
+      vehicles_in_patio_at_close: patioCount,
+      open_tickets_audit: auditTickets,
+    };
     pushShift(closed);
     return ok('Turno cerrado.', closed);
   }, [openShiftOf]);
@@ -736,9 +960,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<Ctx>(() => ({
     ready, mode, online, syncing, syncError, session, data, tenants, toasts, toast, dismissToast, login, logout, openShiftOf,
-    registerEntry, registerExit, openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive,
+    registerEntry, registerExit, registerLostTicket, lookupSubscription, saveAgreement, saveSubscription, renewSubscription,
+    openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive,
     resetFactory, fetchTenantDump, resolveSupport, legalAccepted, recordLegalAcceptance, loadLegalAcceptances,
   }), [ready, mode, online, syncing, syncError, session, data, tenants, toasts, toast, dismissToast, login, logout, openShiftOf, registerEntry, registerExit,
+    registerLostTicket, lookupSubscription, saveAgreement, saveSubscription, renewSubscription,
     openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive, resetFactory, fetchTenantDump, resolveSupport,
     legalAccepted, recordLegalAcceptance, loadLegalAcceptances]);
 

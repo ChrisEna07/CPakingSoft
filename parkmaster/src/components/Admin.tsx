@@ -13,7 +13,7 @@ import { printExecutiveReport } from '@/lib/pdfReport';
 import type { Profile, Tenant, TenantConfig } from '@/lib/types';
 import { Btn, Card, DigitsInput, TextInput, TextOnlyInput } from './ui';
 
-type Tab = 'reportes' | 'config' | 'empleados';
+type Tab = 'reportes' | 'convenios' | 'mensualidades' | 'reporte_convenios' | 'config' | 'empleados';
 
 export function Admin() {
   const [tab, setTab] = useState<Tab>('reportes');
@@ -22,6 +22,9 @@ export function Admin() {
       <div className="flex gap-2 overflow-x-auto pb-1">
         {([
           ['reportes', 'Reportes y Auditoría', FileText],
+          ['convenios', 'Convenios & Locales', DollarSign],
+          ['mensualidades', 'Mensualidades & Abonados', Car],
+          ['reporte_convenios', 'Reporte de Convenios', Clock],
           ['config', 'Configuración del negocio', Settings],
           ['empleados', 'Gestión de Cajeros', Users],
         ] as const).map(([k, l, Ic]) => (
@@ -40,6 +43,9 @@ export function Admin() {
         ))}
       </div>
       {tab === 'reportes' && <Reports />}
+      {tab === 'convenios' && <AgreementsAdmin />}
+      {tab === 'mensualidades' && <SubscriptionsAdmin />}
+      {tab === 'reporte_convenios' && <AgreementsReportAdmin />}
       {tab === 'config' && <BusinessConfig />}
       {tab === 'empleados' && <Employees />}
     </div>
@@ -105,6 +111,7 @@ function BusinessConfig() {
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={c.barrier_enabled} onChange={e => setC({ ...c, barrier_enabled: e.target.checked })} />Talanquera habilitada</label>
           <DigitsInput label="Segundos de apertura de talanquera" value={n('barrier_open_seconds')} onChange={setN('barrier_open_seconds')} maxLength={2} disabled={!c.barrier_enabled} />
         </div>
+        <DigitsInput label="Tarifa Sanción Tiquete Perdido (COP)" value={n('lost_ticket_fee')} onChange={setN('lost_ticket_fee')} format />
       </div>
       <label className="block text-xs text-slate-500 font-medium">Texto legal del tiquete
         <textarea rows={4} value={c.legal_text} onChange={e => setC({ ...c, legal_text: e.target.value })} className="block w-full border border-slate-300 rounded-lg px-3 py-2 text-sm text-slate-900" /></label>
@@ -761,6 +768,535 @@ function Reports() {
                 <tr>
                   <td colSpan={8} className="text-center text-slate-400 py-8">
                     No se han registrado turnos de caja en este período.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ============================================================================
+// CONVENIOS & LOCALES (SMART FIT, LOCALES, ALIANZAS)
+// ============================================================================
+function AgreementsAdmin() {
+  const { data, saveAgreement, toast } = useStore();
+  const [name, setName] = useState('');
+  const [agreementType, setAgreementType] = useState<'porcentaje' | 'tiempo_gratis' | 'tarifa_fija'>('porcentaje');
+  const [discountValue, setDiscountValue] = useState('');
+  const [vehicleType, setVehicleType] = useState<'todos' | 'moto' | 'carro'>('todos');
+  const [requiresCode, setRequiresCode] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  const resetForm = () => {
+    setName('');
+    setAgreementType('porcentaje');
+    setDiscountValue('');
+    setVehicleType('todos');
+    setRequiresCode(false);
+    setEditingId(null);
+  };
+
+  const handleSave = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) { toast('err', 'El nombre del convenio es obligatorio.'); return; }
+    const val = Number(discountValue);
+    if (isNaN(val) || val <= 0) { toast('err', 'El valor de beneficio o descuento debe ser mayor a 0.'); return; }
+
+    const r = saveAgreement({
+      id: editingId || crypto.randomUUID(),
+      tenant_id: '',
+      name: name.trim(),
+      agreement_type: agreementType,
+      discount_value: val,
+      vehicle_type_applicable: vehicleType,
+      requires_validation_code: requiresCode,
+      active: true,
+      created_at: new Date().toISOString(),
+    });
+
+    toast(r.ok ? 'ok' : 'err', r.message);
+    if (r.ok) resetForm();
+  };
+
+  const handleToggleActive = (a: typeof data.agreements[0]) => {
+    const r = saveAgreement({ ...a, active: !a.active });
+    toast('ok', `Convenio ${a.name} ${!a.active ? 'activado' : 'pausado'}.`);
+  };
+
+  const startEdit = (a: typeof data.agreements[0]) => {
+    setEditingId(a.id);
+    setName(a.name);
+    setAgreementType(a.agreement_type);
+    setDiscountValue(String(a.discount_value));
+    setVehicleType(a.vehicle_type_applicable);
+    setRequiresCode(a.requires_validation_code);
+  };
+
+  return (
+    <div className="space-y-6">
+      <Card className="p-5 max-w-2xl border-slate-200">
+        <h3 className="font-black text-slate-900 text-lg mb-3 flex items-center gap-2">
+          <DollarSign className="text-emerald-600" size={20} />
+          {editingId ? 'Editar Convenio Comercial' : 'Crear Nuevo Convenio Comercial'}
+        </h3>
+        <p className="text-xs text-slate-500 mb-4">
+          Configura alianzas comerciales con locales comerciales (ej: Smart Fit, Éxito, Juan Valdez) para aplicar descuentos automáticos en la salida.
+        </p>
+
+        <form onSubmit={handleSave} className="space-y-4">
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">Nombre de la Alianza / Convenio</label>
+            <input
+              type="text"
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="Ej: Smart Fit (2h Gratis) o Restaurante La Fragata (20% Off)"
+              className="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+              required
+            />
+          </div>
+
+          <div className="grid sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Tipo de Beneficio</label>
+              <select
+                value={agreementType}
+                onChange={e => setAgreementType(e.target.value as any)}
+                className="w-full border border-slate-300 rounded-lg p-2.5 text-sm"
+              >
+                <option value="porcentaje">Porcentaje de Descuento (%)</option>
+                <option value="tiempo_gratis">Tiempo de Gracia / Gratis (Minutos)</option>
+                <option value="tarifa_fija">Tarifa Plena Fija (COP)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                {agreementType === 'porcentaje' ? 'Porcentaje de Descuento (%)' : agreementType === 'tiempo_gratis' ? 'Minutos de Parqueo Gratis' : 'Tarifa Fija (COP)'}
+              </label>
+              <input
+                type="number"
+                value={discountValue}
+                onChange={e => setDiscountValue(e.target.value)}
+                placeholder={agreementType === 'porcentaje' ? 'Ej: 20' : agreementType === 'tiempo_gratis' ? 'Ej: 120 (para 2 horas)' : 'Ej: 5000'}
+                className="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                required
+              />
+            </div>
+          </div>
+
+          <div className="grid sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Vehículos Aplicables</label>
+              <select
+                value={vehicleType}
+                onChange={e => setVehicleType(e.target.value as any)}
+                className="w-full border border-slate-300 rounded-lg p-2.5 text-sm"
+              >
+                <option value="todos">Todos (Carros y Motos)</option>
+                <option value="carro">Solo Carros</option>
+                <option value="moto">Solo Motos</option>
+              </select>
+            </div>
+
+            <div className="flex items-center pt-6">
+              <label className="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={requiresCode}
+                  onChange={e => setRequiresCode(e.target.checked)}
+                  className="rounded text-emerald-600 focus:ring-emerald-500"
+                />
+                Exigir Factura o Código de Sello en caja
+              </label>
+            </div>
+          </div>
+
+          <div className="flex gap-2 pt-2">
+            {editingId && (
+              <Btn type="button" onClick={resetForm} className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs">
+                Cancelar
+              </Btn>
+            )}
+            <Btn type="submit" className="bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs px-5">
+              <Save size={16} /> {editingId ? 'Actualizar Convenio' : 'Guardar y Habilitar Convenio'}
+            </Btn>
+          </div>
+        </form>
+      </Card>
+
+      <Card className="p-5 border-slate-200">
+        <h3 className="font-black text-slate-900 text-base mb-3">Convenios Configurados</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs text-left">
+            <thead className="bg-slate-50 text-slate-700 font-bold uppercase border-b">
+              <tr>
+                <th className="p-3">Nombre Convenio</th>
+                <th className="p-3">Tipo</th>
+                <th className="p-3">Valor / Beneficio</th>
+                <th className="p-3">Aplica a</th>
+                <th className="p-3">Exige Código</th>
+                <th className="p-3">Estado</th>
+                <th className="p-3 text-right">Acciones</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {data.agreements.map(a => (
+                <tr key={a.id} className="hover:bg-slate-50">
+                  <td className="p-3 font-bold text-slate-900">{a.name}</td>
+                  <td className="p-3 capitalize">{a.agreement_type.replace('_', ' ')}</td>
+                  <td className="p-3 font-mono font-bold">
+                    {a.agreement_type === 'porcentaje' ? `${a.discount_value}%` : a.agreement_type === 'tiempo_gratis' ? `${a.discount_value} min` : money(a.discount_value)}
+                  </td>
+                  <td className="p-3 capitalize">{a.vehicle_type_applicable}</td>
+                  <td className="p-3">{a.requires_validation_code ? '✅ Sí' : '❌ No'}</td>
+                  <td className="p-3">
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${a.active ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600'}`}>
+                      {a.active ? 'Activo' : 'Pausado'}
+                    </span>
+                  </td>
+                  <td className="p-3 text-right space-x-2">
+                    <button onClick={() => startEdit(a)} className="text-indigo-600 hover:underline font-bold">
+                      Editar
+                    </button>
+                    <button onClick={() => handleToggleActive(a)} className="text-slate-600 hover:underline font-bold">
+                      {a.active ? 'Pausar' : 'Activar'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!data.agreements.length && (
+                <tr>
+                  <td colSpan={7} className="text-center text-slate-400 py-6">
+                    No se han creado convenios comerciales todavía.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ============================================================================
+// MENSUALIDADES & ABONADOS
+// ============================================================================
+function SubscriptionsAdmin() {
+  const { data, saveSubscription, renewSubscription, toast } = useStore();
+  const [name, setName] = useState('');
+  const [doc, setDoc] = useState('');
+  const [phone, setPhone] = useState('');
+  const [plate, setPlate] = useState('');
+  const [vehicleType, setVehicleType] = useState<'moto' | 'carro'>('carro');
+  const [rate, setRate] = useState('');
+  const [startDate, setStartDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [endDate, setEndDate] = useState(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() + 1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  const reset = () => {
+    setName('');
+    setDoc('');
+    setPhone('');
+    setPlate('');
+    setVehicleType('carro');
+    setRate('');
+    setEditingId(null);
+  };
+
+  const handleSave = (e: React.FormEvent) => {
+    e.preventDefault();
+    const p = plate.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!name.trim()) { toast('err', 'El nombre del abonado es obligatorio.'); return; }
+    if (!p) { toast('err', 'La placa es obligatoria.'); return; }
+    const cost = Number(rate);
+    if (isNaN(cost) || cost <= 0) { toast('err', 'El valor mensual debe ser mayor a 0.'); return; }
+
+    const r = saveSubscription({
+      id: editingId || crypto.randomUUID(),
+      tenant_id: '',
+      customer_name: name.trim(),
+      document_id: doc.trim(),
+      phone: phone.trim(),
+      plate: p,
+      vehicle_type: vehicleType,
+      monthly_rate_cop: cost,
+      start_date: startDate,
+      end_date: endDate,
+      status: 'vigente',
+      created_at: new Date().toISOString(),
+    });
+
+    toast(r.ok ? 'ok' : 'err', r.message);
+    if (r.ok) reset();
+  };
+
+  const handleRenew = (id: string) => {
+    const r = renewSubscription(id);
+    toast(r.ok ? 'ok' : 'err', r.message);
+  };
+
+  return (
+    <div className="space-y-6">
+      <Card className="p-5 max-w-2xl border-slate-200">
+        <h3 className="font-black text-slate-900 text-lg mb-3 flex items-center gap-2">
+          <Car className="text-indigo-600" size={20} />
+          {editingId ? 'Editar Mensualista / Abonado' : 'Registrar Nuevo Mensualista / Abonado'}
+        </h3>
+        <p className="text-xs text-slate-500 mb-4">
+          Permite a los clientes fijos ingresar y salir con tarifa plana mensual sin cobro fraccionado por hora en la taquilla.
+        </p>
+
+        <form onSubmit={handleSave} className="space-y-3">
+          <div className="grid sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Nombre del Cliente / Titular</label>
+              <input
+                type="text"
+                value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder="Juan Pérez"
+                className="w-full border border-slate-300 rounded-lg p-2.5 text-sm"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Cédula / Documento</label>
+              <input
+                type="text"
+                value={doc}
+                onChange={e => setDoc(e.target.value)}
+                placeholder="1020304050"
+                className="w-full border border-slate-300 rounded-lg p-2.5 text-sm"
+                required
+              />
+            </div>
+          </div>
+
+          <div className="grid sm:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Teléfono</label>
+              <input
+                type="text"
+                value={phone}
+                onChange={e => setPhone(e.target.value)}
+                placeholder="3001234567"
+                className="w-full border border-slate-300 rounded-lg p-2.5 text-sm"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Placa del Vehículo</label>
+              <input
+                type="text"
+                value={plate}
+                onChange={e => setPlate(e.target.value.toUpperCase())}
+                placeholder="ABC123"
+                className="w-full border border-slate-300 rounded-lg p-2.5 text-sm font-mono font-bold uppercase"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Tipo Vehículo</label>
+              <select
+                value={vehicleType}
+                onChange={e => setVehicleType(e.target.value as any)}
+                className="w-full border border-slate-300 rounded-lg p-2.5 text-sm"
+              >
+                <option value="carro">Carro</option>
+                <option value="moto">Moto</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid sm:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Tarifa Mensual (COP)</label>
+              <input
+                type="number"
+                value={rate}
+                onChange={e => setRate(e.target.value)}
+                placeholder="150000"
+                className="w-full border border-slate-300 rounded-lg p-2.5 text-sm"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Fecha Inicio</label>
+              <input
+                type="date"
+                value={startDate}
+                onChange={e => setStartDate(e.target.value)}
+                className="w-full border border-slate-300 rounded-lg p-2 text-sm"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Fecha Vencimiento</label>
+              <input
+                type="date"
+                value={endDate}
+                onChange={e => setEndDate(e.target.value)}
+                className="w-full border border-slate-300 rounded-lg p-2 text-sm"
+                required
+              />
+            </div>
+          </div>
+
+          <div className="flex gap-2 pt-2">
+            {editingId && (
+              <Btn type="button" onClick={reset} className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs">
+                Cancelar
+              </Btn>
+            )}
+            <Btn type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-5">
+              <Save size={16} /> {editingId ? 'Actualizar Mensualista' : 'Registrar Mensualista'}
+            </Btn>
+          </div>
+        </form>
+      </Card>
+
+      <Card className="p-5 border-slate-200">
+        <h3 className="font-black text-slate-900 text-base mb-3">Listado de Abonados Registrados</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs text-left">
+            <thead className="bg-slate-50 text-slate-700 font-bold uppercase border-b">
+              <tr>
+                <th className="p-3">Titular</th>
+                <th className="p-3">Placa</th>
+                <th className="p-3">Tipo</th>
+                <th className="p-3">Tarifa Mes</th>
+                <th className="p-3">Vencimiento</th>
+                <th className="p-3">Estado</th>
+                <th className="p-3 text-right">Acciones</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {data.subscriptions.map(s => {
+                const isExpired = s.status === 'vencido' || s.end_date < new Date().toISOString().slice(0, 10);
+                return (
+                  <tr key={s.id} className="hover:bg-slate-50">
+                    <td className="p-3 font-bold text-slate-900">
+                      <div>{s.customer_name}</div>
+                      <div className="text-[10px] text-slate-400">CC: {s.document_id} · Tel: {s.phone}</div>
+                    </td>
+                    <td className="p-3 font-mono font-black text-sm">{displayPlate(s.plate)}</td>
+                    <td className="p-3 capitalize">{s.vehicle_type}</td>
+                    <td className="p-3 font-semibold">{money(s.monthly_rate_cop)} COP</td>
+                    <td className="p-3 font-mono">{s.end_date}</td>
+                    <td className="p-3">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${!isExpired ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>
+                        {!isExpired ? 'Vigente' : 'Vencido'}
+                      </span>
+                    </td>
+                    <td className="p-3 text-right space-x-2">
+                      <button
+                        onClick={() => handleRenew(s.id)}
+                        className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold text-[11px]"
+                      >
+                        Renovar Mes (+1)
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {!data.subscriptions.length && (
+                <tr>
+                  <td colSpan={7} className="text-center text-slate-400 py-6">
+                    No se han registrado clientes mensualistas aún.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ============================================================================
+// REPORTE DE CONVENIOS (DISCOUNTS & SUBSIDIOS POR LOCAL)
+// ============================================================================
+function AgreementsReportAdmin() {
+  const { data } = useStore();
+
+  const report = useMemo(() => {
+    const map = new Map<string, { count: number; totalDiscounts: number; totalGross: number }>();
+
+    data.records.forEach(r => {
+      if (r.status === 'cobrado' && r.agreement_name) {
+        const key = r.agreement_name;
+        const cur = map.get(key) || { count: 0, totalDiscounts: 0, totalGross: 0 };
+        cur.count++;
+        cur.totalDiscounts += r.discount_applied_cop ?? 0;
+        cur.totalGross += r.gross_amount ?? (r.total_amount ?? 0);
+        map.set(key, cur);
+      }
+    });
+
+    return Array.from(map.entries()).map(([name, stats]) => ({
+      name,
+      ...stats,
+    }));
+  }, [data.records]);
+
+  const totalSubsidy = report.reduce((sum, item) => sum + item.totalDiscounts, 0);
+
+  return (
+    <div className="space-y-6">
+      <div className="grid sm:grid-cols-2 gap-4">
+        <Card className="p-5 border-slate-200">
+          <div className="text-xs text-slate-500 font-bold uppercase">Total Subsidios Otorgados por Convenios</div>
+          <div className="text-3xl font-black text-emerald-600 mt-1">{money(totalSubsidy)} COP</div>
+          <div className="text-xs text-slate-400 mt-1">Valor acumulado descontado a clientes de aliados</div>
+        </Card>
+        <Card className="p-5 border-slate-200">
+          <div className="text-xs text-slate-500 font-bold uppercase">Convenios con Movimientos</div>
+          <div className="text-3xl font-black text-slate-900 mt-1">{report.length}</div>
+          <div className="text-xs text-slate-400 mt-1">Marcas o locales que validaron parqueo</div>
+        </Card>
+      </div>
+
+      <Card className="p-5 border-slate-200">
+        <h3 className="font-black text-slate-900 text-base mb-3">Detalle de Cobro y Facturación a Locales Aliados</h3>
+        <p className="text-xs text-slate-500 mb-4">
+          Utilice estas métricas para conciliar cuentas y cobrar a final de mes el valor de los descuentos asumidos por el centro comercial o parqueadero.
+        </p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs text-left">
+            <thead className="bg-slate-50 text-slate-700 font-bold uppercase border-b">
+              <tr>
+                <th className="p-3">Local / Convenio</th>
+                <th className="p-3">Tiquetes Validados</th>
+                <th className="p-3">Tarifa Plena Total</th>
+                <th className="p-3">Descuento Otorgado</th>
+                <th className="p-3">A Cobrar al Local</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {report.map(r => (
+                <tr key={r.name} className="hover:bg-slate-50 font-medium">
+                  <td className="p-3 font-bold text-slate-900">{r.name}</td>
+                  <td className="p-3 font-mono font-bold">{r.count} vehículos</td>
+                  <td className="p-3">{money(r.totalGross)} COP</td>
+                  <td className="p-3 text-emerald-600 font-semibold">{money(r.totalDiscounts)} COP</td>
+                  <td className="p-3 font-mono font-black text-slate-900">{money(r.totalDiscounts)} COP</td>
+                </tr>
+              ))}
+              {!report.length && (
+                <tr>
+                  <td colSpan={5} className="text-center text-slate-400 py-6">
+                    Aún no se han registrado cobros con convenios aplicados.
                   </td>
                 </tr>
               )}

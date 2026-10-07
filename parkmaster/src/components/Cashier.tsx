@@ -43,7 +43,7 @@ export function Cashier({ print }: { print: (d: PrintDocT) => void }) {
 }
 
 function Entry({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () => void }) {
-  const { registerEntry, toast, session, openShiftOf } = useStore();
+  const { registerEntry, lookupSubscription, toast, session, openShiftOf } = useStore();
   const [type, setType] = useState<VehicleType>('moto');
   const [plate, setPlate] = useState('');
   const [last, setLast] = useState<ParkingRecord | null>(null);
@@ -85,6 +85,7 @@ function Entry({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () 
 
   const err = plate ? validatePlate(plate, type) : null;
   const warn = plate && !err ? getPlateWarning(plate, type) : null;
+  const subLookup = plate && !err ? lookupSubscription(plate) : null;
 
   const submit = () => {
     const r = registerEntry(plate, type);
@@ -158,6 +159,29 @@ function Entry({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () 
           className={`w-full mt-1 text-center text-4xl sm:text-5xl font-black font-mono tracking-widest uppercase rounded-xl border-4 py-3 sm:py-4 bg-amber-50 focus:outline-none focus:ring-4 focus:ring-emerald-300 ${err ? 'border-red-500' : warn ? 'border-amber-500' : 'border-slate-800'}`}
         />
 
+        {/* Notificación de Mensualidad / Abonado */}
+        {subLookup && (
+          <div className="mt-3">
+            {subLookup.state === 'vigente' ? (
+              <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl text-xs text-emerald-900 flex items-start gap-2">
+                <CheckCircle2 className="text-emerald-600 shrink-0 mt-0.5" size={16} />
+                <div>
+                  <div className="font-bold">Abonado Mensual Activo: {subLookup.sub.customer_name}</div>
+                  <div>Vence el {subLookup.sub.end_date} ({subLookup.daysLeft} días restantes) · Entrada sin cobro</div>
+                </div>
+              </div>
+            ) : (
+              <div className="p-3 bg-red-50 border border-red-300 rounded-xl text-xs text-red-900 flex items-start gap-2">
+                <AlertTriangle className="text-red-600 shrink-0 mt-0.5" size={16} />
+                <div>
+                  <div className="font-bold">⚠️ ATENCIÓN: Mensualidad Vencida ({subLookup.sub.customer_name})</div>
+                  <div>Venció el {subLookup.sub.end_date}. Debe renovar o liquidar como tiquete regular.</div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="min-h-[24px] text-xs mt-1 text-center font-semibold flex items-center justify-center">
           {plate && (
             err ? (
@@ -207,7 +231,7 @@ function Entry({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () 
 }
 
 function Exit({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () => void }) {
-  const { data, session, registerExit, toast, openShiftOf } = useStore();
+  const { data, session, registerExit, registerLostTicket, toast, openShiftOf } = useStore();
   const tenant = session!.tenant!;
   const [q, setQ] = useState('');
   const [sel, setSel] = useState<string | null>(null);
@@ -215,6 +239,19 @@ function Exit({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () =
   const [given, setGiven] = useState('');
   const [verified, setVerified] = useState(false);
   const [now, setNow] = useState(Date.now());
+
+  // Convenios comerciales
+  const [agreementId, setAgreementId] = useState<string>('');
+  const [validationCode, setValidationCode] = useState<string>('');
+
+  // Modal de tiquete perdido
+  const [showLostTicketModal, setShowLostTicketModal] = useState(false);
+  const [lostPlate, setLostPlate] = useState('');
+  const [lostType, setLostType] = useState<VehicleType>('carro');
+  const [lostName, setLostName] = useState('');
+  const [lostDoc, setLostDoc] = useState('');
+  const [lostMethod, setLostMethod] = useState<PaymentMethod>('efectivo');
+
   useEffect(() => { const i = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(i); }, []);
 
   const term = useMemo(() => {
@@ -227,60 +264,224 @@ function Exit({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () =
     .sort((a, b) => new Date(a.entry_time).getTime() - new Date(b.entry_time).getTime()), [data.records, term]);
 
   const rec = list.find(r => r.id === sel) ?? data.records.find(r => r.id === sel && r.status === 'dentro') ?? null;
-  const liq = rec ? liquidate(rec.entry_time, rec.vehicle_type, tenant.config_json, now) : null;
-  const change = given === '' || !liq ? null : Number(given) - liq.amount;
+  
+  // Cálculo de liquidación con convenios
+  const selectedAgreement = data.agreements.find(a => a.id === agreementId) ?? null;
+  const subMatch = rec ? data.subscriptions.find(s => s.plate === rec.plate) ?? null : null;
+  const isSubActive = subMatch ? subMatch.status === 'vigente' : false;
+
+  const rawLiq = rec ? liquidate(rec.entry_time, rec.vehicle_type, tenant.config_json, now) : null;
+  
+  let grossAmount = rawLiq?.amount ?? 0;
+  let discountAmount = 0;
+  let netToPay = grossAmount;
+
+  if (isSubActive) {
+    discountAmount = grossAmount;
+    netToPay = 0;
+  } else if (selectedAgreement && grossAmount > 0) {
+    if (selectedAgreement.agreement_type === 'porcentaje') {
+      discountAmount = Math.round((grossAmount * selectedAgreement.discount_value) / 100);
+      netToPay = Math.max(0, grossAmount - discountAmount);
+    } else if (selectedAgreement.agreement_type === 'tiempo_gratis') {
+      const remainingMinutes = Math.max(0, (rawLiq?.total_minutes ?? 0) - selectedAgreement.discount_value);
+      const recalculated = liquidate(new Date(now - remainingMinutes * 60000).toISOString(), rec!.vehicle_type, tenant.config_json, now);
+      netToPay = recalculated.amount;
+      discountAmount = Math.max(0, grossAmount - netToPay);
+    } else if (selectedAgreement.agreement_type === 'tarifa_fija') {
+      netToPay = Math.min(grossAmount, selectedAgreement.discount_value);
+      discountAmount = Math.max(0, grossAmount - netToPay);
+    }
+  }
+
+  const change = given === '' ? null : Number(given) - netToPay;
 
   const pay = () => {
-    if (!rec || !liq) return;
-    if (liq.amount > 0 && method === 'efectivo' && given !== '' && Number(given) < liq.amount) { toast('err', `Efectivo insuficiente: faltan ${money(liq.amount - Number(given))} COP para completar el pago.`); return; }
-    if (liq.amount > 0 && method === 'transferencia' && !verified) { toast('info', 'Confirme que la transferencia fue verificada en la app del banco antes de registrar la salida.'); return; }
-    const r = registerExit(rec.id, method);
-    if (!r.ok) { toast(r.kind, r.message); if (r.kind === 'info' && !openShiftOf()) goTurno(); return; }
+    if (!rec) return;
+    if (selectedAgreement?.requires_validation_code && !validationCode.trim()) {
+      toast('err', 'Este convenio exige ingresar el número de factura o código de sello.');
+      return;
+    }
+    if (netToPay > 0 && method === 'efectivo' && given !== '' && Number(given) < netToPay) {
+      toast('err', `Efectivo insuficiente: faltan ${money(netToPay - Number(given))} COP para completar el pago.`);
+      return;
+    }
+    if (netToPay > 0 && method === 'transferencia' && !verified) {
+      toast('info', 'Confirme que la transferencia fue verificada en la app del banco antes de registrar la salida.');
+      return;
+    }
+    const r = registerExit(rec.id, method, {
+      agreementId: agreementId || null,
+      validationCode: validationCode.trim() || null,
+    });
+    if (!r.ok) {
+      toast(r.kind, r.message);
+      if (r.kind === 'info' && !openShiftOf()) goTurno();
+      return;
+    }
     toast('ok', r.message);
-    setSel(null); setGiven(''); setVerified(false); setQ('');
-    if (r.data && r.data.total_amount) print({ kind: 'receipt', record: r.data });
+    setSel(null);
+    setGiven('');
+    setVerified(false);
+    setQ('');
+    setAgreementId('');
+    setValidationCode('');
+    if (r.data && (r.data.total_amount || r.data.payment_method === 'cortesia')) {
+      print({ kind: 'receipt', record: r.data });
+    }
+  };
+
+  const handleLostTicketSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const p = normalizePlate(lostPlate);
+    const err = validatePlate(p, lostType);
+    if (err) { toast('err', err); return; }
+    if (!lostName.trim()) { toast('err', 'Ingrese el nombre de la persona que retira el vehículo.'); return; }
+    if (!lostDoc.trim()) { toast('err', 'Ingrese el documento de identidad.'); return; }
+
+    const r = registerLostTicket({
+      recordId: rec?.plate === p ? rec.id : undefined,
+      plate: p,
+      vehicleType: lostType,
+      holderName: lostName,
+      holderDoc: lostDoc,
+      method: lostMethod,
+    });
+
+    if (!r.ok) {
+      toast(r.kind, r.message);
+      return;
+    }
+    toast('ok', r.message);
+    setShowLostTicketModal(false);
+    setLostPlate('');
+    setLostName('');
+    setLostDoc('');
+    if (r.data) print({ kind: 'receipt', record: r.data });
   };
 
   return (
     <div className="grid lg:grid-cols-5 gap-5">
       <div className="lg:col-span-3 space-y-3">
-        <Card className="p-3"><div className="relative">
-          <Search size={18} className="absolute left-3 top-3 text-slate-400" />
-          <input autoFocus value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && list.length === 1) setSel(list[0].id); }}
-            placeholder="Placa, código de tiquete o escanee el QR…" className="w-full pl-10 pr-3 py-2.5 rounded-lg border border-slate-300 uppercase focus:outline-none focus:ring-2 focus:ring-emerald-400" />
-        </div></Card>
+        <div className="flex gap-2">
+          <Card className="p-3 flex-1"><div className="relative">
+            <Search size={18} className="absolute left-3 top-3 text-slate-400" />
+            <input autoFocus value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && list.length === 1) setSel(list[0].id); }}
+              placeholder="Placa, código de tiquete o escanee el QR…" className="w-full pl-10 pr-3 py-2.5 rounded-lg border border-slate-300 uppercase focus:outline-none focus:ring-2 focus:ring-emerald-400" />
+          </div></Card>
+          <Btn
+            type="button"
+            onClick={() => {
+              if (rec) {
+                setLostPlate(rec.plate);
+                setLostType(rec.vehicle_type);
+              }
+              setShowLostTicketModal(true);
+            }}
+            className="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-2 shrink-0 font-bold flex items-center gap-1.5"
+          >
+            <AlertTriangle size={16} /> Liquidar Tiquete Perdido
+          </Btn>
+        </div>
+
         <div className="text-xs text-slate-500 px-1">{list.length} vehículo(s) · mayor permanencia primero</div>
         <div className="space-y-2 max-h-[62vh] overflow-auto pr-1">
           {list.length === 0 && <Card className="p-8 text-center text-slate-400">No hay vehículos que coincidan.</Card>}
           {list.map(r => {
             const k = liquidate(r.entry_time, r.vehicle_type, tenant.config_json, now);
+            const isSub = data.subscriptions.some(s => s.plate === r.plate && s.status === 'vigente');
             return (
-              <button key={r.id} onClick={() => { setSel(r.id); setGiven(''); setVerified(false); setMethod('efectivo'); }} className={`w-full text-left bg-white rounded-xl border-2 p-3 flex items-center gap-3 hover:shadow ${sel === r.id ? 'border-emerald-500' : 'border-slate-200'}`}>
+              <button key={r.id} onClick={() => { setSel(r.id); setGiven(''); setVerified(false); setMethod('efectivo'); setAgreementId(''); setValidationCode(''); }} className={`w-full text-left bg-white rounded-xl border-2 p-3 flex items-center gap-3 hover:shadow ${sel === r.id ? 'border-emerald-500' : 'border-slate-200'}`}>
                 <div className="p-2 rounded-lg bg-indigo-50 text-indigo-700">{r.vehicle_type === 'moto' ? <Bike /> : <Car />}</div>
-                <div className="flex-1 min-w-0"><div className="font-mono font-black text-lg">{displayPlate(r.plate)}</div><div className="text-xs text-slate-500">#{r.ticket_code} · {fmtDT(r.entry_time)}{r.sync_status === 'pending' ? ' · ⏳ pendiente de sync' : ''}</div></div>
-                <div className="text-right"><div className="text-sm font-semibold">{durText(k.total_minutes)}</div>
-                  <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${k.free ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{k.free ? 'Gracia · $0' : money(k.amount)}</span></div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-mono font-black text-lg flex items-center gap-2">
+                    {displayPlate(r.plate)}
+                    {isSub && <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full">ABONADO</span>}
+                  </div>
+                  <div className="text-xs text-slate-500">#{r.ticket_code} · {fmtDT(r.entry_time)}{r.sync_status === 'pending' ? ' · ⏳ pendiente de sync' : ''}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-sm font-semibold">{durText(k.total_minutes)}</div>
+                  <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${isSub ? 'bg-emerald-100 text-emerald-800' : k.free ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                    {isSub ? 'Abonado · $0' : k.free ? 'Gracia · $0' : money(k.amount)}
+                  </span>
+                </div>
               </button>
             );
           })}
         </div>
       </div>
+
       <div className="lg:col-span-2">
         <Card className="p-5 lg:sticky lg:top-4">
           <div className="flex items-center gap-2 font-bold mb-3"><Calculator size={20} />Tarjeta de Cobro</div>
-          {!rec || !liq ? <div className="text-center text-slate-400 py-10 text-sm">Seleccione un vehículo para liquidar</div> : (
+          {!rec || !rawLiq ? <div className="text-center text-slate-400 py-10 text-sm">Seleccione un vehículo para liquidar</div> : (
             <>
-              <div className="flex items-center justify-between mb-3"><div className="font-mono font-black text-2xl">{displayPlate(rec.plate)}</div><span className="text-xs font-bold bg-slate-100 px-2 py-1 rounded uppercase">{rec.vehicle_type}</span></div>
+              <div className="flex items-center justify-between mb-3">
+                <div className="font-mono font-black text-2xl">{displayPlate(rec.plate)}</div>
+                <span className="text-xs font-bold bg-slate-100 px-2 py-1 rounded uppercase">{rec.vehicle_type}</span>
+              </div>
+
+              {isSubActive && (
+                <div className="mb-3 p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800 font-semibold flex items-center gap-2">
+                  <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
+                  Vehículo con mensualidad activa ({subMatch?.customer_name}). Salida sin costo ($0 COP).
+                </div>
+              )}
+
+              {/* Selector de Convenio Comercial */}
+              {!isSubActive && data.agreements.filter(a => a.active).length > 0 && (
+                <div className="mb-3 p-3 bg-indigo-50/60 border border-indigo-200 rounded-xl space-y-2">
+                  <label className="block text-xs font-bold text-indigo-900">
+                    Convenio Comercial / Descuento de Local
+                  </label>
+                  <select
+                    value={agreementId}
+                    onChange={e => setAgreementId(e.target.value)}
+                    className="w-full text-xs font-medium border border-indigo-300 rounded-lg p-2 bg-white text-slate-800 focus:ring-2 focus:ring-indigo-400"
+                  >
+                    <option value="">Sin convenio (Tarifa Plena)</option>
+                    {data.agreements.filter(a => a.active && (a.vehicle_type_applicable === 'todos' || a.vehicle_type_applicable === rec.vehicle_type)).map(a => (
+                      <option key={a.id} value={a.id}>
+                        {a.name} ({a.agreement_type === 'porcentaje' ? `${a.discount_value}% off` : a.agreement_type === 'tiempo_gratis' ? `${a.discount_value} min gratis` : `$${a.discount_value} fija`})
+                      </option>
+                    ))}
+                  </select>
+
+                  {selectedAgreement?.requires_validation_code && (
+                    <input
+                      type="text"
+                      value={validationCode}
+                      onChange={e => setValidationCode(e.target.value)}
+                      placeholder="Factura # o Código de Sello Obligatorio"
+                      className="w-full text-xs border border-indigo-300 rounded-lg p-2 bg-white font-mono uppercase focus:ring-2 focus:ring-indigo-400"
+                    />
+                  )}
+                </div>
+              )}
+
               <dl className="text-sm space-y-2 border-y border-slate-200 py-3">
-                <div className="flex justify-between"><dt className="text-slate-500">Tiempo total</dt><dd className="font-semibold">{durText(liq.total_minutes)}</dd></div>
-                <div className="flex justify-between"><dt className="text-slate-500">Tarifa / hora</dt><dd className="font-semibold">{money(liq.rate)}</dd></div>
+                <div className="flex justify-between"><dt className="text-slate-500">Tiempo total</dt><dd className="font-semibold">{durText(rawLiq.total_minutes)}</dd></div>
+                <div className="flex justify-between"><dt className="text-slate-500">Tarifa / hora</dt><dd className="font-semibold">{money(rawLiq.rate)}</dd></div>
                 <div className="flex justify-between"><dt className="text-slate-500">Gracia</dt><dd className="font-semibold">{tenant.config_json.grace_minutes} min</dd></div>
-                {!liq.free && <div className="flex justify-between"><dt className="text-slate-500">Cobrado</dt><dd className="font-semibold">{liq.units} {liq.unit_label}</dd></div>}
+                {grossAmount > 0 && (
+                  <div className="flex justify-between"><dt className="text-slate-500">Tarifa Plena</dt><dd className="font-semibold">{money(grossAmount)} COP</dd></div>
+                )}
+                {discountAmount > 0 && (
+                  <div className="flex justify-between text-emerald-600 font-bold"><dt>Descuento aplicado</dt><dd>-{money(discountAmount)} COP</dd></div>
+                )}
               </dl>
-              <div className="py-3 text-right"><div className="text-xs text-slate-500">TOTAL A PAGAR</div>
-                <div className={`text-4xl font-black ${liq.free ? 'text-emerald-600' : ''}`}>{money(liq.amount)} <span className="text-base">COP</span></div>
-                {liq.free && <div className="text-sm font-semibold text-emerald-600">Período de Gracia Gratuito</div>}</div>
-              {!liq.free && (
+
+              <div className="py-3 text-right">
+                <div className="text-xs text-slate-500">TOTAL A PAGAR</div>
+                <div className={`text-4xl font-black ${netToPay === 0 ? 'text-emerald-600' : ''}`}>
+                  {money(netToPay)} <span className="text-base">COP</span>
+                </div>
+                {netToPay === 0 && rawLiq.free && <div className="text-sm font-semibold text-emerald-600">Período de Gracia Gratuito</div>}
+                {netToPay === 0 && isSubActive && <div className="text-sm font-semibold text-emerald-600">Abonado Mensual Cubierto</div>}
+              </div>
+
+              {netToPay > 0 && (
                 <>
                   <div className="grid grid-cols-2 gap-2 mb-3">
                     {([['efectivo', 'Efectivo', Banknote], ['transferencia', 'Transferencia', Landmark]] as const).map(([k, l, Ic]) => (
@@ -294,7 +495,7 @@ function Exit({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () =
                     </div>
                   )}
                   {method === 'transferencia' && (
-                    <label className="flex items-center gap-2 text-sm mb-3 bg-amber-50 border border-amber-200 rounded-lg p-3"><input type="checkbox" checked={verified} onChange={e => setVerified(e.target.checked)} />Transferencia verificada en la app del banco ({money(liq.amount)} COP)</label>
+                    <label className="flex items-center gap-2 text-sm mb-3 bg-amber-50 border border-amber-200 rounded-lg p-3"><input type="checkbox" checked={verified} onChange={e => setVerified(e.target.checked)} />Transferencia verificada en la app del banco ({money(netToPay)} COP)</label>
                   )}
                 </>
               )}
@@ -303,6 +504,104 @@ function Exit({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () =
           )}
         </Card>
       </div>
+
+      {/* Modal de Tiquete Perdido */}
+      {showLostTicketModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm grid place-items-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 border border-slate-200">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="text-amber-600" size={22} />
+                <h3 className="font-bold text-slate-900 text-base">Salida por Tiquete Perdido</h3>
+              </div>
+              <button onClick={() => setShowLostTicketModal(false)} className="text-slate-400 hover:text-slate-600">✕</button>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              Se cobrará la tarifa de sanción configurada: <b>{money(tenant.config_json.lost_ticket_fee ?? 15000)} COP</b>. Debe registrar la identificación obligatoria del conductor para fines de auditoría legal.
+            </p>
+
+            <form onSubmit={handleLostTicketSubmit} className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Tipo de Vehículo</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setLostType('moto')}
+                    className={`py-2 rounded-lg font-bold text-xs border ${lostType === 'moto' ? 'bg-slate-900 text-white border-slate-900' : 'bg-slate-50 text-slate-700 border-slate-300'}`}
+                  >
+                    Moto
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLostType('carro')}
+                    className={`py-2 rounded-lg font-bold text-xs border ${lostType === 'carro' ? 'bg-slate-900 text-white border-slate-900' : 'bg-slate-50 text-slate-700 border-slate-300'}`}
+                  >
+                    Carro
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Placa del Vehículo</label>
+                <input
+                  type="text"
+                  value={lostPlate}
+                  onChange={e => setLostPlate(normalizePlate(e.target.value))}
+                  placeholder="ABC123"
+                  className="w-full border border-slate-300 rounded-lg p-2.5 font-mono uppercase text-lg font-black focus:ring-2 focus:ring-amber-500 outline-none"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Nombre Completo del Conductor / Propietario</label>
+                <input
+                  type="text"
+                  value={lostName}
+                  onChange={e => setLostName(e.target.value)}
+                  placeholder="Carlos Andrés Gómez"
+                  className="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-amber-500 outline-none"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Cédula / Documento de Identidad</label>
+                <input
+                  type="text"
+                  value={lostDoc}
+                  onChange={e => setLostDoc(e.target.value)}
+                  placeholder="1020304050"
+                  className="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-amber-500 outline-none"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Método de Pago</label>
+                <select
+                  value={lostMethod}
+                  onChange={e => setLostMethod(e.target.value as PaymentMethod)}
+                  className="w-full border border-slate-300 rounded-lg p-2 text-sm"
+                >
+                  <option value="efectivo">Efectivo</option>
+                  <option value="transferencia">Transferencia Bancaria</option>
+                </select>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <Btn type="button" onClick={() => setShowLostTicketModal(false)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700">
+                  Cancelar
+                </Btn>
+                <Btn type="submit" className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold">
+                  Liquidar e Imprimir
+                </Btn>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -314,6 +613,9 @@ function ShiftPanel({ print }: { print: (d: PrintDocT) => void }) {
   const [result, setResult] = useState<CashShift | null>(null);
   const shift = openShiftOf();
   const name = session!.profile.full_name;
+
+  // Conteo de vehículos en patio para aviso de pernocta / traspaso de turno
+  const vehiclesInPatio = data.records.filter(r => r.status === 'dentro');
 
   const open = () => {
     if (base === '') { toast('err', 'Error al abrir turno: debe digitar la base de efectivo inicial (puede ser 0).'); return; }
@@ -349,6 +651,20 @@ function ShiftPanel({ print }: { print: (d: PrintDocT) => void }) {
               <div className="flex justify-between"><span>Abierto</span><b>{fmtDT(shift.opened_at)}</b></div>
               <div className="flex justify-between"><span>Base inicial</span><b>{money(shift.initial_base_cash)}</b></div>
             </div>
+
+            {/* Tarjeta de Traspaso de Patio / Pernocta */}
+            {vehiclesInPatio.length > 0 && (
+              <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 space-y-1">
+                <div className="font-bold flex items-center gap-1.5 text-amber-800">
+                  <AlertTriangle size={15} /> Inventario Nocturno / Traspaso de Patio ({vehiclesInPatio.length} vehículos dentro)
+                </div>
+                <p className="leading-relaxed text-[11px] text-amber-700">
+                  Hay {vehiclesInPatio.length} vehículo(s) actualmente dentro de las instalaciones. 
+                  <b> El cierre de turno NO se bloquea:</b> el cobro de estos vehículos se atribuirá al turno y cajero que registre su salida efectiva. Se adjuntará el inventario al arqueo para auditoría.
+                </p>
+              </div>
+            )}
+
             <div className="font-semibold mb-1 flex items-center gap-2"><Lock size={16} />Cierre ciego</div>
             <p className="text-sm text-slate-500 mb-2">Cuente todo el efectivo (incluida la base) y digítelo. El sistema no muestra cuánto debería haber.</p>
             <DigitsInput label="EFECTIVO FÍSICO EN MANO (COP)" value={real} onChange={setReal} format placeholder="$0" className="text-2xl font-black" />
@@ -367,8 +683,11 @@ function ShiftPanel({ print }: { print: (d: PrintDocT) => void }) {
                 {d > 0 && <><Info className="text-sky-600" />ℹ️ Sobrante de Dinero: +{money(d)} COP</>}
               </div>
               <div className="text-sm space-y-1">
-                {[['Base inicial', result.initial_base_cash], ['Cobros en efectivo', t.cash], ['Cobros por transferencia', t.transfer], ['Motos', t.moto], ['Carros', t.carro], ['Efectivo esperado', result.system_calculated_cash], ['Efectivo reportado', result.reported_cash]].map(([l, v]) => (
+                {[['Base inicial', result.initial_base_cash], ['Cobros en efectivo', t.cash], ['Cobros por transferencia', t.transfer], ['Motos', t.moto], ['Carros', t.carro], ['Descuentos otorgados', t.discounts], ['Efectivo esperado', result.system_calculated_cash], ['Efectivo reportado', result.reported_cash]].map(([l, v]) => (
                   <div key={String(l)} className="flex justify-between border-b border-slate-100 py-1"><span className="text-slate-500">{l}</span><b>{money(Number(v))}</b></div>))}
+                {Boolean(result.vehicles_in_patio_at_close && result.vehicles_in_patio_at_close > 0) && (
+                  <div className="flex justify-between border-b border-slate-100 py-1 text-amber-700"><span className="font-semibold">Vehículos en patio al cierre</span><b>{result.vehicles_in_patio_at_close} pendientes</b></div>
+                )}
               </div>
               <Btn onClick={() => print({ kind: 'arqueo', shift: result, cashier: name, cash: t.cash, transfer: t.transfer, moto: t.moto, carro: t.carro })} className="w-full mt-4 bg-slate-800 text-white py-2.5"><Printer size={18} />Imprimir comprobante de arqueo</Btn>
             </Card>

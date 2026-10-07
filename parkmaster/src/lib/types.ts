@@ -17,6 +17,8 @@ export interface TenantConfig {
   paper_width: 58 | 80;
   barrier_enabled: boolean;
   barrier_open_seconds: number;
+  lost_ticket_fee: number;        // tarifa penalizadora si no existe registro de entrada
+  lost_ticket_surcharge: number;  // recargo adicional cuando sí existe entrada pero se perdió el tiquete
 }
 
 export interface Tenant {
@@ -65,6 +67,25 @@ export interface ParkingRecord {
   created_by: string | null;
   closed_by: string | null;
   sync_status: 'synced' | 'pending';
+  // --- Convenios comerciales ---
+  agreement_id?: string | null;
+  agreement_name?: string | null;
+  gross_amount?: number | null;          // tarifa plena antes de descuentos
+  discount_applied_cop?: number | null;  // ahorro otorgado por el convenio
+  validation_code?: string | null;       // código de factura / sello del local
+  // --- Mensualistas ---
+  subscription_id?: string | null;
+  // --- Tiquete perdido ---
+  lost_ticket?: boolean | null;
+  lost_ticket_holder_name?: string | null;
+  lost_ticket_holder_doc?: string | null;
+}
+
+export interface OpenTicketAudit {
+  ticket_code: string;
+  plate: string;
+  vehicle_type: VehicleType;
+  entry_time: string;
 }
 
 export interface CashShift {
@@ -78,6 +99,40 @@ export interface CashShift {
   reported_cash: number | null;
   difference: number | null;
   status: 'abierto' | 'cerrado';
+  // Inventario nocturno / traspaso de patio
+  vehicles_in_patio_at_close?: number | null;
+  open_tickets_audit?: OpenTicketAudit[] | null;
+}
+
+export type AgreementType = 'porcentaje' | 'tiempo_gratis' | 'tarifa_fija';
+
+export interface CommercialAgreement {
+  id: string;
+  tenant_id: string;
+  name: string;
+  agreement_type: AgreementType;
+  discount_value: number;             // % | minutos gratis | tarifa fija COP
+  vehicle_type_applicable: 'todos' | VehicleType;
+  requires_validation_code: boolean;
+  active: boolean;
+  created_at: string;
+}
+
+export type SubscriptionStatus = 'vigente' | 'vencido' | 'suspendido';
+
+export interface MonthlySubscription {
+  id: string;
+  tenant_id: string;
+  customer_name: string;
+  document_id: string;
+  phone: string | null;
+  plate: string;
+  vehicle_type: VehicleType;
+  monthly_rate_cop: number;
+  start_date: string;   // YYYY-MM-DD
+  end_date: string;     // YYYY-MM-DD
+  status: SubscriptionStatus;
+  created_at: string;
 }
 
 export interface SupportTicket {
@@ -90,22 +145,24 @@ export interface SupportTicket {
   resolved: boolean;
 }
 
-export type SyncTable = 'parking_records' | 'cash_shifts' | 'support_tickets';
+export type SyncTable = 'parking_records' | 'cash_shifts' | 'support_tickets' | 'commercial_agreements' | 'monthly_subscriptions';
 export interface QueueItem {
   id: string;
   table: SyncTable;
-  row: ParkingRecord | CashShift | SupportTicket;
+  row: ParkingRecord | CashShift | SupportTicket | CommercialAgreement | MonthlySubscription;
 }
 
 export interface TenantData {
   records: ParkingRecord[];
   shifts: CashShift[];
   tickets: SupportTicket[];
+  agreements: CommercialAgreement[];
+  subscriptions: MonthlySubscription[];
   queue: QueueItem[];
   counters: { moto: number; carro: number };
 }
 
-export const EMPTY_DATA: TenantData = { records: [], shifts: [], tickets: [], queue: [], counters: { moto: 0, carro: 0 } };
+export const EMPTY_DATA: TenantData = { records: [], shifts: [], tickets: [], agreements: [], subscriptions: [], queue: [], counters: { moto: 0, carro: 0 } };
 
 export const DEFAULT_CONFIG: TenantConfig = {
   rate_moto: 1500,
@@ -119,6 +176,8 @@ export const DEFAULT_CONFIG: TenantConfig = {
   paper_width: 80,
   barrier_enabled: false,
   barrier_open_seconds: 5,
+  lost_ticket_fee: 15000,
+  lost_ticket_surcharge: 0,
 };
 
 export interface LegalAcceptance {
