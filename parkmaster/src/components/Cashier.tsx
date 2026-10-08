@@ -449,13 +449,19 @@ function Exit({ print, goTurno }: { print: (d: PrintDocT) => void; goTurno: () =
                   </select>
 
                   {selectedAgreement?.requires_validation_code && (
-                    <input
-                      type="text"
-                      value={validationCode}
-                      onChange={e => setValidationCode(e.target.value)}
-                      placeholder="Factura # o Código de Sello Obligatorio"
-                      className="w-full text-xs border border-indigo-300 rounded-lg p-2 bg-white font-mono uppercase focus:ring-2 focus:ring-indigo-400"
-                    />
+                    <div className="space-y-1">
+                      <input
+                        type="text"
+                        value={validationCode}
+                        onChange={e => setValidationCode(e.target.value)}
+                        placeholder="Ej. Factura Éxito #1234 o Cód. Smart Fit"
+                        className="w-full text-xs border border-indigo-300 rounded-lg p-2 bg-white font-mono uppercase focus:ring-2 focus:ring-indigo-400"
+                        required
+                      />
+                      <p className="text-[10px] text-indigo-700 leading-tight">
+                        Digita el número de factura o consecutivo sellado entregado por el local comercial para auditar el descuento.
+                      </p>
+                    </div>
                   )}
                 </div>
               )}

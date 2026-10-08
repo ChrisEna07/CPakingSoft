@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Download, Save, Settings, UserPlus, Users, FileText, Power, DollarSign,
   Car, Clock, ShieldAlert, FileSpreadsheet, Search, AlertTriangle, CheckCircle2,
-  Calendar, Banknote, RefreshCw
+  Calendar, Banknote, RefreshCw, KeyRound, Copy, Eye, EyeOff
 } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { dkey, downloadFile, fmtDT_CO, money, toCSV } from '@/lib/format';
@@ -121,12 +121,18 @@ function BusinessConfig() {
 }
 
 function Employees() {
-  const { data, loadEmployees, createEmployee, setEmployeeActive, toast } = useStore();
+  const { data, loadEmployees, createEmployee, setEmployeeActive, resetEmployeePassword, toast } = useStore();
   const [list, setList] = useState<Profile[]>([]);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [pw, setPw] = useState('');
   const [deniedModal, setDeniedModal] = useState<string | null>(null);
+
+  // Modal de detalles y reseteo de clave
+  const [selectedEmp, setSelectedEmp] = useState<Profile | null>(null);
+  const [newEmpPassword, setNewEmpPassword] = useState('');
+  const [showEmpPw, setShowEmpPw] = useState(false);
+  const [resettingPw, setResettingPw] = useState(false);
 
   const refresh = () => {
     loadEmployees().then(setList);
@@ -182,6 +188,31 @@ function Employees() {
     refresh();
   };
 
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedEmp) return;
+    if (newEmpPassword.length < 6) {
+      toast('err', 'La contraseña debe tener al menos 6 caracteres.');
+      return;
+    }
+    setResettingPw(true);
+    const res = await resetEmployeePassword(selectedEmp.id, newEmpPassword);
+    setResettingPw(false);
+    toast(res.ok ? 'ok' : 'err', res.message);
+    if (res.ok) {
+      setNewEmpPassword('');
+    }
+  };
+
+  const copyWhatsAppCredentials = () => {
+    if (!selectedEmp) return;
+    const origin = typeof window !== 'undefined' ? window.location.origin : 'https://c-paking-soft.vercel.app';
+    const pwdText = newEmpPassword ? `\n🔑 Contraseña asignada: ${newEmpPassword}` : '\n🔑 Tu contraseña configurada por la administración.';
+    const text = `¡Hola ${selectedEmp.full_name}! 👋\nAquí tienes tus accesos de taquilla para el sistema CParkingSoft:\n🌐 Sistema: ${origin}\n👤 Usuario / Correo: ${selectedEmp.email}${pwdText}\n\nIngresa al sistema para abrir tu turno y registrar entradas y cobros.`;
+    navigator.clipboard.writeText(text);
+    toast('ok', '¡Kit de acceso copiado al portapapeles para WhatsApp!');
+  };
+
   return (
     <div className="grid lg:grid-cols-2 gap-5">
       <Card className="p-5 space-y-3">
@@ -209,30 +240,141 @@ function Employees() {
         <div className="font-bold mb-3 text-slate-900">Cajeros de este parqueadero ({list.length})</div>
         <div className="space-y-2">
           {list.map(p => (
-            <div key={p.id} className="flex items-center gap-3 border border-slate-200 rounded-xl p-3 bg-slate-50/50">
+            <div key={p.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border border-slate-200 rounded-xl p-3 bg-slate-50/50">
               <div className="flex-1 min-w-0">
                 <div className="font-semibold text-slate-900">{p.full_name}</div>
                 <div className="text-xs text-slate-500 font-mono">{p.email}</div>
               </div>
-              <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${p.active ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>
-                {p.active ? 'Activo' : 'Inactivo'}
-              </span>
-              <Btn
-                onClick={() => toggle(p)}
-                className={`text-xs px-3 py-1.5 font-semibold transition ${
-                  p.active
-                    ? 'bg-amber-100 hover:bg-amber-200 text-amber-900'
-                    : 'bg-emerald-100 hover:bg-emerald-200 text-emerald-800'
-                }`}
-              >
-                <Power size={13} />
-                {p.active ? 'Desactivar' : 'Activar'}
-              </Btn>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${p.active ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>
+                  {p.active ? 'Activo' : 'Inactivo'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { setSelectedEmp(p); setNewEmpPassword(''); }}
+                  className="px-2.5 py-1 text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white rounded-lg flex items-center gap-1 shadow-sm transition"
+                >
+                  <KeyRound size={13} />
+                  Ver Detalles & Clave
+                </button>
+                <Btn
+                  onClick={() => toggle(p)}
+                  className={`text-xs px-2.5 py-1 font-semibold transition ${
+                    p.active
+                      ? 'bg-amber-100 hover:bg-amber-200 text-amber-900'
+                      : 'bg-emerald-100 hover:bg-emerald-200 text-emerald-800'
+                  }`}
+                >
+                  <Power size={13} />
+                  {p.active ? 'Desactivar' : 'Activar'}
+                </Btn>
+              </div>
             </div>
           ))}
           {!list.length && <div className="text-sm text-slate-400 text-center py-8">Aún no hay cajeros registrados.</div>}
         </div>
       </Card>
+
+      {/* Modal de Detalles y Reseteo Rápido de Contraseña */}
+      {selectedEmp && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm grid place-items-center p-4" role="dialog">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 border border-slate-200">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
+                  <KeyRound size={20} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 text-base">Detalles y Clave del Cajero</h3>
+                  <p className="text-[11px] text-slate-500">Gestión inmediata de credenciales de acceso</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedEmp(null)}
+                className="text-slate-400 hover:text-slate-600 p-1"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs space-y-1.5">
+              <div className="flex justify-between">
+                <span className="text-slate-500">Nombre:</span>
+                <span className="font-bold text-slate-900">{selectedEmp.full_name}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Correo de acceso:</span>
+                <span className="font-mono text-slate-900">{selectedEmp.email}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Rol:</span>
+                <span className="font-bold text-emerald-700 capitalize">{selectedEmp.role}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Estado:</span>
+                <span className={`font-bold ${selectedEmp.active ? 'text-emerald-600' : 'text-slate-500'}`}>
+                  {selectedEmp.active ? '🟢 Activo para operar' : '⚪ Inactivo'}
+                </span>
+              </div>
+            </div>
+
+            {/* Formulario de Reseteo Rápido */}
+            <form onSubmit={handleResetPassword} className="space-y-3 pt-1">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Nueva Contraseña Directa (sin confirmación por correo)
+                </label>
+                <div className="relative">
+                  <input
+                    type={showEmpPw ? 'text' : 'password'}
+                    value={newEmpPassword}
+                    onChange={e => setNewEmpPassword(e.target.value)}
+                    placeholder="Escriba la nueva clave (mín. 6 caracteres)"
+                    className="w-full border border-slate-300 rounded-lg p-2.5 pr-10 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowEmpPw(!showEmpPw)}
+                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600"
+                  >
+                    {showEmpPw ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <Btn
+                  type="submit"
+                  disabled={resettingPw}
+                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2.5"
+                >
+                  {resettingPw ? 'Actualizando clave…' : '🔑 Asignar Nueva Clave'}
+                </Btn>
+                <button
+                  type="button"
+                  onClick={copyWhatsAppCredentials}
+                  className="px-3 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 shadow-sm transition"
+                  title="Copiar mensaje de acceso para WhatsApp"
+                >
+                  <Copy size={14} /> Copiar Credenciales para WhatsApp
+                </button>
+              </div>
+            </form>
+
+            <div className="pt-2 text-right">
+              <button
+                type="button"
+                onClick={() => setSelectedEmp(null)}
+                className="text-xs font-semibold text-slate-500 hover:text-slate-700 px-3 py-1.5"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal de Advertencia por Turno Abierto */}
       {deniedModal && (

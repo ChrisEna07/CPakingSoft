@@ -58,6 +58,7 @@ interface Ctx {
   loadEmployees: () => Promise<Profile[]>;
   createEmployee: (fullName: string, email: string, password: string) => Promise<ActionResult>;
   setEmployeeActive: (id: string, active: boolean, employeeName?: string) => Promise<ActionResult>;
+  resetEmployeePassword: (userId: string, newPassword: string) => Promise<ActionResult>;
   resetFactory: (tenantId?: string) => Promise<ActionResult>;
   fetchTenantDump: (tenantId: string) => Promise<{ profiles: Profile[]; records: ParkingRecord[]; shifts: CashShift[]; tickets: SupportTicket[] }>;
   resolveSupport: (tenantId: string) => Promise<void>;
@@ -336,7 +337,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return () => { ch.close(); bc.current = null; };
   }, [tid]);
 
-  // ---------- sincronización de la cola ----------
+  // ---------- sincronización de la cola (SyncEngine Resiliente) ----------
   const runSync = useCallback(async () => {
     if (!supabase || !navigator.onLine || syncingRef.current || !sessionRef.current?.tenant) return;
     const queue = dataRef.current.queue;
@@ -344,9 +345,39 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     syncingRef.current = true; setSyncing(true);
     try {
       for (const item of queue) {
+        // Descarte de registros huérfanos o con IDs inválidos/vacíos
+        if (!item.row || !item.row.id || typeof item.row.id !== 'string' || item.row.id.trim() === '') {
+          setData(d => ({ ...d, queue: d.queue.filter(x => x.id !== item.id) }));
+          continue;
+        }
+
         const row = item.table === 'parking_records' ? { ...(item.row as ParkingRecord), sync_status: 'synced' } : item.row;
-        const { error } = await supabase.from(item.table).upsert(row as never, { onConflict: 'id' });
-        if (error) { setSyncError(`${item.table}: ${error.message}`); return; }
+        
+        let upsertError: any = null;
+        try {
+          const { error } = await supabase.from(item.table).upsert(row as never, { onConflict: 'id' });
+          upsertError = error;
+        } catch (netErr: any) {
+          upsertError = netErr;
+        }
+
+        if (upsertError) {
+          const msg = upsertError.message || String(upsertError);
+          // Si el registro ya existe de forma conflictiva, o es error de RLS silencioso, descartamos de cola para evitar bloqueo permanente
+          if (msg.includes('duplicate key') || msg.includes('already exists')) {
+            setData(d => ({ ...d, queue: d.queue.filter(x => x.id !== item.id) }));
+            continue;
+          }
+          // Para otros errores no bloqueantes en convenios o aceptaciones
+          if (item.table === 'commercial_agreements' && msg.includes('violates foreign key')) {
+            setData(d => ({ ...d, queue: d.queue.filter(x => x.id !== item.id) }));
+            continue;
+          }
+
+          setSyncError(`${item.table}: ${msg}`);
+          return;
+        }
+
         setData(d => ({
           ...d,
           queue: d.queue.filter(x => !(x.id === item.id && x.row === item.row)),
@@ -583,7 +614,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const saveAgreement = useCallback((a: CommercialAgreement): ActionResult<CommercialAgreement> => {
     const s = sessionRef.current;
     if (!s?.tenant) return fail('No hay un parqueadero asociado a su usuario.');
-    const updated: CommercialAgreement = { ...a, tenant_id: s.tenant.id };
+    const validId = a.id && a.id.trim() !== '' ? a.id : uid();
+    const updated: CommercialAgreement = { ...a, id: validId, tenant_id: s.tenant.id };
     setData(d => ({
       ...d,
       agreements: upsertById(d.agreements, updated),
@@ -826,6 +858,42 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return ok(active ? 'Cajero activado.' : 'Cajero desactivado.');
   }, []);
 
+  const resetEmployeePassword = useCallback(async (userId: string, newPassword: string): Promise<ActionResult> => {
+    if (newPassword.length < 6) return fail('La contraseña debe tener al menos 6 caracteres.');
+
+    if (supabase) {
+      if (!navigator.onLine) return fail('Esta operación requiere conexión a internet.', 'info');
+      const { data: sess } = await supabase.auth.getSession();
+      const token = sess.session?.access_token || '';
+
+      try {
+        const res = await fetch('/api/admin/reset-employee-password', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ userId, newPassword }),
+        });
+
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          return fail(j.error || 'No se pudo actualizar la contraseña del cajero.');
+        }
+        return ok(j.message || 'Contraseña del cajero actualizada con éxito.');
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : 'Error de red';
+        return fail(`Error al actualizar contraseña: ${msg}`);
+      }
+    }
+
+    const users = await kvGet<LocalUser[]>('local:users', seedUsers());
+    const target = users.find(u => u.id === userId);
+    if (!target) return fail('Empleado no encontrado.');
+    await kvSet('local:users', users.map(u => (u.id === userId ? { ...u, password: newPassword } : u)));
+    return ok(`Contraseña de ${target.full_name} actualizada con éxito en modo local.`);
+  }, []);
+
   const resetFactory = useCallback(async (tenantId?: string): Promise<ActionResult> => {
     if (supabase) {
       if (!navigator.onLine) return fail('Esta operación requiere conexión a internet.', 'info');
@@ -961,11 +1029,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const value = useMemo<Ctx>(() => ({
     ready, mode, online, syncing, syncError, session, data, tenants, toasts, toast, dismissToast, login, logout, openShiftOf,
     registerEntry, registerExit, registerLostTicket, lookupSubscription, saveAgreement, saveSubscription, renewSubscription,
-    openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive,
+    openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive, resetEmployeePassword,
     resetFactory, fetchTenantDump, resolveSupport, legalAccepted, recordLegalAcceptance, loadLegalAcceptances,
   }), [ready, mode, online, syncing, syncError, session, data, tenants, toasts, toast, dismissToast, login, logout, openShiftOf, registerEntry, registerExit,
     registerLostTicket, lookupSubscription, saveAgreement, saveSubscription, renewSubscription,
-    openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive, resetFactory, fetchTenantDump, resolveSupport,
+    openShift, closeShift, addSupportTicket, saveTenant, createTenant, loadEmployees, createEmployee, setEmployeeActive, resetEmployeePassword, resetFactory, fetchTenantDump, resolveSupport,
     legalAccepted, recordLegalAcceptance, loadLegalAcceptances]);
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>;
